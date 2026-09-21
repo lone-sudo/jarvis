@@ -1,9 +1,24 @@
 import uuid
 from pathlib import Path
 
+from jarvis.policy.rules import SecurityPolicy
 from jarvis.state.database import get_connection, init_db
 
 VALID_TASK_STATUSES = {"PENDING", "IN_PROGRESS", "AWAITING_USER", "BLOCKED", "DONE", "ABORTED"}
+
+# Which transitions are meaningful, not just "is this a known status."
+# Gemini's review (point 5) correctly noted the original validation only
+# checked status membership, not transition legality. Kept deliberately
+# small — this is not a full state-machine framework, just enough to
+# reject obviously wrong jumps (e.g. DONE -> PENDING).
+ALLOWED_TRANSITIONS = {
+    "PENDING": {"IN_PROGRESS", "AWAITING_USER", "BLOCKED", "ABORTED"},
+    "IN_PROGRESS": {"AWAITING_USER", "DONE", "BLOCKED", "ABORTED"},
+    "AWAITING_USER": {"IN_PROGRESS", "DONE", "BLOCKED", "ABORTED"},
+    "BLOCKED": {"IN_PROGRESS", "ABORTED"},
+    "DONE": set(),      # terminal
+    "ABORTED": set(),   # terminal
+}
 
 
 class StateTracker:
@@ -11,7 +26,11 @@ class StateTracker:
         self.db_path = init_db(db_path)
 
     def register_project(self, project_key: str, relative_root: str, display_name: str | None = None) -> None:
-        posix_root = Path(relative_root).as_posix()
+        # Gemini's review (point 2): the database must never contain a
+        # project root that resolves outside the workspace — enforced
+        # here, not left to callers to have validated it first.
+        resolved = SecurityPolicy.resolve_safe_path(relative_root)  # raises PermissionError if unsafe
+        posix_root = resolved.relative_to(SecurityPolicy.get_workspace_root()).as_posix()
         with get_connection(self.db_path) as conn:
             conn.execute(
                 """
@@ -64,12 +83,19 @@ class StateTracker:
         if new_status not in VALID_TASK_STATUSES:
             raise ValueError(f"Invalid status '{new_status}'. Must be one of {sorted(VALID_TASK_STATUSES)}.")
         with get_connection(self.db_path) as conn:
-            cur = conn.execute(
+            row = conn.execute("SELECT status FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"No task found with id '{task_id}'.")
+            current = row["status"]
+            if new_status != current and new_status not in ALLOWED_TRANSITIONS.get(current, set()):
+                raise ValueError(
+                    f"Invalid transition '{current}' -> '{new_status}'. "
+                    f"Allowed from '{current}': {sorted(ALLOWED_TRANSITIONS.get(current, set())) or '(terminal)'}."
+                )
+            conn.execute(
                 "UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
                 (new_status, task_id),
             )
-            if cur.rowcount == 0:
-                raise ValueError(f"No task found with id '{task_id}'.")
 
     def get_active_tasks(self) -> list[dict]:
         with get_connection(self.db_path) as conn:

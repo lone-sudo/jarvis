@@ -30,7 +30,8 @@ jarvis note structural-rcc-suite "Found root cause: unhandled None in load_facto
 jarvis resume
 
 # V1: confirmed writes (shows a diff, asks [y/N] before touching disk)
-jarvis write-file --task TSK-XXXXXXXX path/to/file.py --content-file local_draft.py
+# --content-file must itself be inside the workspace (policy-checked before it's read)
+jarvis write-file --task TSK-XXXXXXXX path/to/file.py --content-file structural-rcc-suite/local_draft.py
 jarvis git-commit --task TSK-XXXXXXXX --project structural-rcc-suite --message "Fix beam calc"
 
 # V1: dispatch a prompt to your existing ChatGPT/Claude/Gemini subscription

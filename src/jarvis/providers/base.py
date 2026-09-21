@@ -1,4 +1,4 @@
-from jarvis.policy.validator import PolicyValidator
+from jarvis.policy.validator import PolicyValidator, PolicyViolation
 from jarvis.state.tracker import StateTracker
 
 try:
@@ -24,8 +24,10 @@ class ManualClipboardProvider:
         self.provider_name = provider_name
 
     def dispatch_prompt(self, prompt_text: str) -> str:
-        if not PolicyValidator.authorize_provider(self.provider_name, expects_cost=False):
-            return "ERROR: Provider blocked by policy."
+        try:
+            PolicyValidator.authorize_provider(self.provider_name, expects_cost=False)
+        except PolicyViolation as e:
+            return f"ERROR: Access denied by policy. {e}"
 
         print("\n" + "=" * 60)
         if _CLIPBOARD_AVAILABLE:

@@ -6,11 +6,16 @@ from jarvis.tools.git import GitInspector
 from jarvis.tools.fs import FileSystemInspector
 from jarvis.memory.markdown import ProjectMemory
 from jarvis.providers.base import ManualClipboardProvider
+from jarvis.policy.rules import SecurityPolicy
 
 
 def cmd_init_project(args):
     tracker = StateTracker()
-    tracker.register_project(args.key, args.path, args.name)
+    try:
+        tracker.register_project(args.key, args.path, args.name)
+    except PermissionError as e:
+        print(f"ERROR: project path rejected by policy: {e}")
+        return
     print(f"Registered project '{args.key}' -> workspace/{args.path}")
 
 
@@ -37,13 +42,33 @@ def cmd_note(args):
     if not project_root:
         print(f"ERROR: project '{args.project}' is not registered. Run `jarvis init-project` first.")
         return
-    ProjectMemory.append_note(project_root, args.text)
-    print(f"Note added to {args.project}.")
+    result = ProjectMemory.append_note(project_root, args.text)
+    print(result)
 
 
 def cmd_write_file(args):
     tracker = StateTracker()
-    content = args.content if args.content is not None else open(args.content_file, encoding="utf-8").read()
+
+    if args.content is not None:
+        content = args.content
+    else:
+        # Gemini flagged (correctly) that this previously called open()
+        # directly, reading an arbitrary local file's contents into the
+        # process — and printing them in the diff preview — before the
+        # workspace policy was ever consulted, regardless of whether the
+        # eventual write target was authorized. A --content-file must
+        # itself live inside the workspace, same as any other path Jarvis
+        # touches on the user's behalf.
+        try:
+            content_file_path = SecurityPolicy.resolve_safe_path(args.content_file)
+        except PermissionError as e:
+            print(f"ERROR: --content-file rejected by policy: {e}")
+            return
+        if not content_file_path.is_file():
+            print(f"ERROR: --content-file '{args.content_file}' is not a file.")
+            return
+        content = content_file_path.read_text(encoding="utf-8")
+
     result = run_logged(
         tracker, args.task, "write_file", "SAFE_WRITE",
         lambda: FileSystemInspector.write_file(args.path, content),

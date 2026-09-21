@@ -16,3 +16,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Lets `pytest` find the jarvis package without needing `pip install -e .`
+# or a manually-set PYTHONPATH first — both ChatGPT and Gemini hit the
+# ModuleNotFoundError this avoids while setting up on Windows.
+pythonpath = ["src"]

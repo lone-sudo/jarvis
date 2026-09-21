@@ -2,7 +2,7 @@ import difflib
 from pathlib import Path
 
 from jarvis.policy.rules import ActionTier, SecurityPolicy
-from jarvis.policy.validator import PolicyValidator
+from jarvis.policy.validator import PolicyValidator, PolicyViolation
 
 
 def _confirm(prompt: str) -> bool:
@@ -15,8 +15,10 @@ class FileSystemInspector:
     @staticmethod
     def read_file(relative_path: str, max_chars: int = 20000) -> str:
         target = SecurityPolicy.get_workspace_root() / relative_path
-        if not PolicyValidator.authorize_tool("read_file", ActionTier.OBSERVE, target):
-            return "ERROR: Access denied by policy."
+        try:
+            PolicyValidator.authorize_tool("read_file", ActionTier.OBSERVE, target)
+        except PolicyViolation as e:
+            return f"ERROR: Access denied by policy. {e}"
         if not target.is_file():
             return f"ERROR: '{target}' is not a file."
         try:
@@ -30,8 +32,10 @@ class FileSystemInspector:
     @staticmethod
     def list_directory(relative_path: str = "") -> list[str]:
         target = SecurityPolicy.get_workspace_root() / relative_path
-        if not PolicyValidator.authorize_tool("list_directory", ActionTier.OBSERVE, target):
-            return ["ERROR: Access denied by policy."]
+        try:
+            PolicyValidator.authorize_tool("list_directory", ActionTier.OBSERVE, target)
+        except PolicyViolation as e:
+            return [f"ERROR: Access denied by policy. {e}"]
         if not target.is_dir():
             return [f"ERROR: '{target}' is not a directory."]
         return sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
@@ -45,8 +49,10 @@ class FileSystemInspector:
         interactive callers must go through the real prompt).
         """
         target = SecurityPolicy.get_workspace_root() / relative_path
-        if not PolicyValidator.authorize_tool("write_file", ActionTier.SAFE_WRITE, target):
-            return "ERROR: Access denied by policy."
+        try:
+            PolicyValidator.authorize_tool("write_file", ActionTier.SAFE_WRITE, target)
+        except PolicyViolation as e:
+            return f"ERROR: Access denied by policy. {e}"
 
         old_content = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
         diff = "\n".join(

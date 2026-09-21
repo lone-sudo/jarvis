@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from jarvis.policy.rules import ActionTier, SecurityPolicy
-from jarvis.policy.validator import PolicyValidator
+from jarvis.policy.validator import PolicyValidator, PolicyViolation
 
 
 def _confirm(prompt: str) -> bool:
@@ -19,7 +19,7 @@ class GitInspector:
             )
             return result.stdout.strip()
         except FileNotFoundError:
-            # git itself isn't installed / not on PATH — distinct from a
+            # git itself isn't installed / not on PATH -- distinct from a
             # git command failing, and Gemini's original code didn't
             # catch this case at all, so it would crash the CLI outright.
             return "ERROR: git executable not found."
@@ -31,9 +31,10 @@ class GitInspector:
     @staticmethod
     def get_status(project_relative_root: str) -> str:
         target_dir = SecurityPolicy.get_workspace_root() / project_relative_root
-
-        if not PolicyValidator.authorize_tool("git_status", ActionTier.OBSERVE, target_dir):
-            return "ERROR: Access denied by policy."
+        try:
+            PolicyValidator.authorize_tool("git_status", ActionTier.OBSERVE, target_dir)
+        except PolicyViolation as e:
+            return f"ERROR: Access denied by policy. {e}"
         if not target_dir.exists():
             return f"ERROR: '{target_dir}' does not exist."
         if not (target_dir / ".git").exists():
@@ -44,15 +45,19 @@ class GitInspector:
     @staticmethod
     def get_current_branch(project_relative_root: str) -> str:
         target_dir = SecurityPolicy.get_workspace_root() / project_relative_root
-        if not PolicyValidator.authorize_tool("git_branch", ActionTier.OBSERVE, target_dir):
-            return "ERROR: Access denied by policy."
+        try:
+            PolicyValidator.authorize_tool("git_branch", ActionTier.OBSERVE, target_dir)
+        except PolicyViolation as e:
+            return f"ERROR: Access denied by policy. {e}"
         return GitInspector._run(["branch", "--show-current"], target_dir)
 
     @staticmethod
     def get_recent_log(project_relative_root: str, count: int = 3) -> str:
         target_dir = SecurityPolicy.get_workspace_root() / project_relative_root
-        if not PolicyValidator.authorize_tool("git_log", ActionTier.OBSERVE, target_dir):
-            return "ERROR: Access denied by policy."
+        try:
+            PolicyValidator.authorize_tool("git_log", ActionTier.OBSERVE, target_dir)
+        except PolicyViolation as e:
+            return f"ERROR: Access denied by policy. {e}"
         return GitInspector._run(["log", f"-n{count}", "--oneline"], target_dir)
 
     @staticmethod
@@ -64,8 +69,10 @@ class GitInspector:
         caller (see tools/base.py::run_logged), not silently dropped.
         """
         target_dir = SecurityPolicy.get_workspace_root() / project_relative_root
-        if not PolicyValidator.authorize_tool("git_commit", ActionTier.SAFE_WRITE, target_dir):
-            return "ERROR: Access denied by policy."
+        try:
+            PolicyValidator.authorize_tool("git_commit", ActionTier.SAFE_WRITE, target_dir)
+        except PolicyViolation as e:
+            return f"ERROR: Access denied by policy. {e}"
         if not (target_dir / ".git").exists():
             return "ERROR: Not a git repository."
 
