@@ -1,0 +1,24 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "Personal AI Operating Layer - Prototype Milestone 001"
+requires-python = ">=3.10"
+dependencies = [
+    "pyperclip>=1.8.2",
+]
+
+[project.scripts]
+jarvis = "jarvis.interface.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Lets `pytest` find the jarvis package without needing `pip install -e .`
+# or a manually-set PYTHONPATH first — both ChatGPT and Gemini hit the
+# ModuleNotFoundError this avoids while setting up on Windows.
+pythonpath = ["src"]
