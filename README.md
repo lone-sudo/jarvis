@@ -46,6 +46,12 @@ jarvis inbox                                  # list everything
 jarvis inbox --status PROCESSED               # list just what's been classified
 jarvis inbox-link INB-XXXXXXXX data-engineering  # the ONLY way an item gets linked to a project
 jarvis inbox-archive INB-XXXXXXXX
+
+# V3: controlled URL fetch (deny-by-default — nothing is fetchable until allowlisted)
+jarvis network-list                          # see what's allowed (starts empty)
+jarvis network-allow example.com             # explicitly allow a domain
+jarvis save --url "https://example.com/article" --title "..." --fetch  # single HTTPS request, confirmed, bounded
+# plain `jarvis save --url ...` WITHOUT --fetch never makes a network request — that stays the default
 ```
 
 ## Tests

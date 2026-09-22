@@ -12,9 +12,10 @@ from pathlib import Path
 
 
 class ActionTier(Enum):
-    OBSERVE = 0      # Read-only: git status, read file, list directory
-    SAFE_WRITE = 1   # Local mutations: git commit, write file (explicit confirmation)
-    DANGEROUS = 2     # Always blocked in Milestone 001: sudo, destructive ops, out-of-scope paths
+    OBSERVE = 0              # Read-only: git status, read file, list directory
+    SAFE_WRITE = 1           # Local mutations: git commit, write file (explicit confirmation)
+    EXTERNAL_NETWORK_READ = 2  # V3: a single outbound HTTPS request (explicit confirmation, deny-by-default allowlist)
+    DANGEROUS = 3             # Always blocked: sudo, destructive ops, out-of-scope paths
 
 
 class SecurityPolicy:

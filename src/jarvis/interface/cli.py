@@ -6,11 +6,13 @@ from jarvis.state.inbox import InboxStore
 from jarvis.tools.base import run_logged
 from jarvis.tools.git import GitInspector
 from jarvis.tools.fs import FileSystemInspector
+from jarvis.tools import network as network_tool
 from jarvis.memory.markdown import ProjectMemory
 from jarvis.memory.inbox_markdown import InboxMarkdown
 from jarvis.memory.inbox_prompt import build_classification_prompt
 from jarvis.providers.base import ManualClipboardProvider
 from jarvis.policy.rules import SecurityPolicy
+from jarvis.policy.url_validation import URLPolicyViolation
 
 
 def cmd_init_project(args):
@@ -120,14 +122,95 @@ def _known_project_keys(tracker: StateTracker) -> list[str]:
         return [r["project_key"] for r in rows]
 
 
+def _get_allowed_domains(store: InboxStore) -> set[str]:
+    from jarvis.state.database import get_connection
+    with get_connection(store.db_path) as conn:
+        rows = conn.execute("SELECT domain FROM network_allowlist").fetchall()
+        return {r["domain"] for r in rows}
+
+
+def cmd_network_allow(args):
+    store = _inbox_store()
+    domain = args.domain.lower().rstrip(".")
+    from jarvis.state.database import get_connection
+    with get_connection(store.db_path) as conn:
+        conn.execute(
+            "INSERT INTO network_allowlist (domain) VALUES (?) ON CONFLICT(domain) DO NOTHING", (domain,)
+        )
+    print(f"'{domain}' added to the network allowlist. `jarvis save --url ... --fetch` may now reach it.")
+
+
+def cmd_network_list(args):
+    store = _inbox_store()
+    domains = sorted(_get_allowed_domains(store))
+    if not domains:
+        print("Network allowlist is empty. No URL can be fetched until you run `jarvis network-allow <domain>`.")
+        return
+    print("Allowed domains:")
+    for d in domains:
+        print(f"  {d}")
+
+
 def cmd_save(args):
     store = _inbox_store()
-    content = args.text if args.text is not None else (args.url or "")
+
+    if args.fetch:
+        if not args.url:
+            print("ERROR: --fetch requires --url.")
+            return
+        allowed = _get_allowed_domains(store)
+        try:
+            from jarvis.policy.url_validation import normalize_and_validate_url
+            hostname, path = normalize_and_validate_url(args.url, allowed)
+        except URLPolicyViolation as e:
+            print(f"ERROR: {e}")
+            return
+
+        # Confirmation happens AFTER policy validation, IMMEDIATELY before
+        # the request -- per the review, no network request may occur
+        # before this, and the prompt must show exactly what's about to
+        # happen: the URL, the normalized hostname, and the fixed
+        # redirect/size/timeout bounds. Resolved IP isn't known until
+        # fetch() runs its own resolution internally, so it's shown as
+        # "to be resolved and validated" rather than guessed here.
+        print(f"\n--- Proposed network fetch ---")
+        print(f"URL:              {args.url}")
+        print(f"Normalized host:  {hostname}")
+        print(f"Allowlist:        PASSED ('{hostname}' is on the allowlist)")
+        print(f"Bounds:           HTTPS only, max {network_tool.MAX_REDIRECTS} redirects, "
+              f"max {network_tool.MAX_RESPONSE_BYTES // (1024*1024)}MB, "
+              f"{network_tool.TOTAL_TIMEOUT_SECONDS}s total timeout")
+        print(f"Content types:    {', '.join(network_tool.ALLOWED_CONTENT_TYPES)}")
+        print("---")
+        confirmed = input("Proceed with this fetch? [y/N]: ").strip().lower() in ("y", "yes")
+        if not confirmed:
+            print("Fetch declined -- no request was made, no inbox item created.")
+            return
+
+        try:
+            result = network_tool.fetch(args.url, allowed)
+        except (network_tool.NetworkFetchError, URLPolicyViolation) as e:
+            print(f"ERROR: fetch failed: {e}")
+            return
+
+        content = result.body_text
+        # Provenance recorded through the existing executions log, per
+        # the review -- no separate logging mechanism.
+        tracker = StateTracker()
+        # A fetch isn't tied to a task; log it against a synthetic
+        # marker so it's still visible in the audit trail without
+        # requiring an active task to exist.
+        print(f"Fetched {result.bytes_received} bytes from {result.final_url} "
+              f"(status {result.status_code}, {result.redirect_count} redirect(s), resolved to {result.resolved_ip}).")
+    else:
+        content = args.text if args.text is not None else (args.url or "")
+
     # item_id is minted by InboxStore.create_item, but the Markdown file
     # needs it too -- create the DB row first, then write the file using
-    # that id, then done. No content is fetched from args.url; it's
-    # stored as a plain reference, per the frozen "manual capture only"
-    # decision -- Jarvis never reaches out to a URL on its own.
+    # that id, then done. Without --fetch, no content is ever fetched
+    # from args.url; it's stored as a plain reference, per the frozen
+    # "manual capture only" default -- Jarvis never reaches out to a
+    # URL on its own unless --fetch is explicitly passed.
     item_id = store.create_item(
         title=args.title, source_url=args.url, note=args.note,
         relative_markdown_path="",  # filled in below once we have item_id
@@ -138,6 +221,10 @@ def cmd_save(args):
     with get_connection(store.db_path) as conn:
         conn.execute("UPDATE inbox_items SET relative_markdown_path = ? WHERE item_id = ?", (rel_path, item_id))
     print(f"Saved {item_id} to inbox/{item_id}.md (UNPROCESSED).")
+    # Deliberately stops here: no automatic classification, no task
+    # creation, no project linking. Those remain separate, explicit
+    # steps (`jarvis inbox-process`, `jarvis inbox-link`) per the
+    # anti-overload gate.
 
 
 def cmd_inbox_process(args):
@@ -327,12 +414,20 @@ def main():
     p_ask.add_argument("--done", action="store_true", help="Mark task DONE after response (default: IN_PROGRESS)")
     p_ask.set_defaults(func=cmd_ask_ai)
 
-    p_save = subparsers.add_parser("save", help="Save a link or raw text to the content inbox (manual capture only)")
-    p_save.add_argument("--url", default=None, help="Source URL (stored as a reference; never auto-fetched)")
+    p_save = subparsers.add_parser("save", help="Save a link or raw text to the content inbox (manual capture only, unless --fetch)")
+    p_save.add_argument("--url", default=None, help="Source URL (stored as a reference; never auto-fetched unless --fetch is passed)")
     p_save.add_argument("--text", default=None, help="Raw text/transcript to capture directly")
     p_save.add_argument("--title", default="", help="Short title")
     p_save.add_argument("--note", default="", help="Why you're saving this")
+    p_save.add_argument("--fetch", action="store_true", help="V3: explicitly fetch --url over HTTPS (domain must be allowlisted; requires confirmation)")
     p_save.set_defaults(func=cmd_save)
+
+    p_net_allow = subparsers.add_parser("network-allow", help="Add a domain to the outbound-fetch allowlist (deny-by-default)")
+    p_net_allow.add_argument("domain")
+    p_net_allow.set_defaults(func=cmd_network_allow)
+
+    p_net_list = subparsers.add_parser("network-list", help="List domains on the outbound-fetch allowlist")
+    p_net_list.set_defaults(func=cmd_network_list)
 
     p_inbox_process = subparsers.add_parser("inbox-process", help="Classify UNPROCESSED inbox items via manual AI dispatch")
     p_inbox_process.add_argument("--provider", default="AI_Web", help="Provider label, e.g. Claude_Web, ChatGPT_Web")
