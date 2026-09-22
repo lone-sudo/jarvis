@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 
 from jarvis.policy.rules import SecurityPolicy
+from jarvis.state.migration_runner import apply_pending_migrations
 
 
 def default_db_path() -> Path:
@@ -36,8 +37,14 @@ def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: str | Path | None = None) -> Path:
+    """
+    Superseded the old executescript(schema.sql) approach — see
+    build-log 0007. Now applies numbered migrations from
+    state/migrations/ in order, tracked via a schema_version table,
+    each in its own transaction. Safe to call on every StateTracker
+    init: pending migrations apply, already-applied ones are skipped.
+    """
     path = Path(db_path) if db_path else default_db_path()
-    schema_path = Path(__file__).parent / "schema.sql"
-    with get_connection(path) as conn:
-        conn.executescript(schema_path.read_text())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    apply_pending_migrations(path)
     return path
