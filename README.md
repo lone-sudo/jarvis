@@ -52,6 +52,16 @@ jarvis network-list                          # see what's allowed (starts empty)
 jarvis network-allow example.com             # explicitly allow a domain
 jarvis save --url "https://example.com/article" --title "..." --fetch  # single HTTPS request, confirmed, bounded
 # plain `jarvis save --url ...` WITHOUT --fetch never makes a network request — that stays the default
+
+# V2 completion: consolidation (Jaccard tag similarity, preview-first, manual only)
+jarvis inbox-consolidate
+# Finds clusters of PROCESSED items sharing enough tags (Jaccard >= 0.5), shows a preview
+# and proposed merged note per cluster, and asks [y/N] before writing anything.
+# - Items confirmed-linked to the SAME project -> merged note written to that project's memory
+# - Unlinked items (including anything with only a suggested_project_key) -> merged into a
+#   new plain inbox item instead — an AI's suggestion never grants write access to project memory
+# - Originals are archived (never deleted) only AFTER a successful write — a failed write
+#   leaves the originals untouched
 ```
 
 ## Tests

@@ -42,20 +42,47 @@ class ManualClipboardProvider:
             print(prompt_text)
 
         print("\n1. Paste it into the AI's web/desktop interface.")
-        print("2. Copy the AI's response.")
-        print("3. Press Enter here, then paste the response and press Enter again.")
+        print("2. Copy the AI's FULL response to your clipboard.")
         print("=" * 60 + "\n")
 
-        input("Press Enter when the response is on your clipboard (or ready to paste manually)... ")
-
         if _CLIPBOARD_AVAILABLE:
+            # Deliberately unambiguous: this prompt must NEVER invite the
+            # user to paste here. A previous version said "...or ready to
+            # paste manually", which on Windows PowerShell caused
+            # multi-line pastes to be consumed one line per input() call,
+            # then leak the remaining lines onto the interactive shell
+            # once the script exited -- exactly the failure this fixes.
+            input("Once the response is copied, press Enter (do NOT paste anything here): ")
             try:
-                return pyperclip.paste()
+                response = pyperclip.paste()
             except Exception:
-                pass
+                response = ""
+            preview = response.strip().replace("\n", " ")[:80]
+            print(f"Read from clipboard ({len(response)} chars): {preview}{'...' if len(response) > 80 else ''}")
+            if response.strip():
+                return response
 
-        print("Paste the response below, then press Enter:")
-        return input("> ")
+            print("Clipboard appears empty or unreadable — falling back to manual multi-line entry.\n")
+
+        return self._read_multiline_manual_entry()
+
+    @staticmethod
+    def _read_multiline_manual_entry() -> str:
+        """
+        Explicit, safe multi-line fallback for when clipboard reading
+        isn't available or came back empty. Reads repeated input() calls
+        (each safely handles one line) until a terminator line, rather
+        than a single input() call that would truncate multi-line JSON
+        the same way the old flow did.
+        """
+        print("Paste the full response below, then type END on its own line and press Enter:")
+        lines = []
+        while True:
+            line = input()
+            if line.strip() == "END":
+                break
+            lines.append(line)
+        return "\n".join(lines)
 
     def dispatch_and_track(
         self, tracker: StateTracker, task_id: str, prompt_text: str, *, mark_done: bool = False

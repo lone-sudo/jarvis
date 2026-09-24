@@ -10,6 +10,7 @@ from jarvis.tools import network as network_tool
 from jarvis.memory.markdown import ProjectMemory
 from jarvis.memory.inbox_markdown import InboxMarkdown
 from jarvis.memory.inbox_prompt import build_classification_prompt
+from jarvis.memory.consolidation import find_clusters, build_consolidated_note
 from jarvis.providers.base import ManualClipboardProvider
 from jarvis.policy.rules import SecurityPolicy
 from jarvis.policy.url_validation import URLPolicyViolation
@@ -258,8 +259,33 @@ def cmd_inbox_process(args):
             parsed = json.loads(raw_response.strip())
         except json.JSONDecodeError as e:
             print(f"ERROR: could not parse response as JSON for {item['item_id']}: {e}")
-            print("Skipping this item -- it remains UNPROCESSED, try again with `jarvis inbox process`.")
+            print("This usually means the paste was incomplete or interrupted.")
+            print("Skipping this item -- it remains UNPROCESSED, try again with `jarvis inbox-process`.")
             continue
+
+        if not isinstance(parsed, dict):
+            print(f"ERROR: response for {item['item_id']} was valid JSON but not a JSON object -- skipping.")
+            continue
+
+        # Schema check: the AI may return technically-valid JSON that
+        # doesn't match our expected shape at all (e.g. it answered a
+        # different question, or ignored the format instructions). Rather
+        # than silently accepting empty/defaulted fields, count how many
+        # of the expected keys are actually present and refuse the ones
+        # that look like a completely different response.
+        expected_keys = {"summary", "tags", "actionable", "related_project", "confidence"}
+        present_keys = expected_keys & parsed.keys()
+        if len(present_keys) < 2:
+            print(f"ERROR: response for {item['item_id']} doesn't match the expected classification "
+                  f"format (found keys: {sorted(parsed.keys())}, expected some of {sorted(expected_keys)}).")
+            print("The AI likely didn't follow the prompt's format instructions, or the wrong response was pasted.")
+            print("Skipping this item -- it remains UNPROCESSED, try again with `jarvis inbox-process`.")
+            continue
+
+        missing = expected_keys - present_keys
+        if missing:
+            print(f"WARNING: response for {item['item_id']} is missing expected field(s): {sorted(missing)} "
+                  f"-- proceeding with defaults for those, but double-check the result with `jarvis inbox`.")
 
         summary = parsed.get("summary", "")
         tags = parsed.get("tags", [])
@@ -324,6 +350,90 @@ def cmd_inbox_archive(args):
         print(f"Archived {args.item_id}.")
     except ValueError as e:
         print(f"ERROR: {e}")
+
+
+def _write_consolidated_note(tracker: StateTracker, store: InboxStore, cluster) -> None:
+    """
+    Writes the consolidated note to its destination, per the converged
+    project-boundary rule: a confirmed project_key -> that project's
+    ProjectMemory; anything unlinked (including items with only a
+    suggested_project_key, which grants no write permission) -> a new
+    combined inbox item instead. Raises on failure -- the caller must
+    NOT archive the source items unless this succeeds, per the
+    atomicity requirement both reviewers specified.
+    """
+    note_text = build_consolidated_note(cluster)
+
+    if cluster.project_key:
+        project_root = tracker.get_project_root(cluster.project_key)
+        if not project_root:
+            raise RuntimeError(f"Project '{cluster.project_key}' is confirmed-linked but no longer registered.")
+        result = ProjectMemory.append_note(project_root, note_text)
+        if "denied by policy" in result.lower() or result.startswith("ERROR"):
+            raise RuntimeError(result)
+    else:
+        # No confirmed project -- becomes a new, plain inbox item the
+        # user can review and explicitly link later, exactly like any
+        # other saved content. Not silently written into any project.
+        combined_id = store.create_item(
+            title=f"Consolidated: {', '.join(sorted(cluster.shared_tags)) or 'untagged cluster'}",
+            source_url=None,
+            note=f"Auto-consolidated from {len(cluster.items)} inbox items via jarvis inbox-consolidate.",
+            relative_markdown_path="",
+        )
+        rel_path = InboxMarkdown.relative_path_for(combined_id)
+        InboxMarkdown.write_capture(combined_id, f"Consolidated cluster", None, "", note_text)
+        from jarvis.state.database import get_connection
+        with get_connection(store.db_path) as conn:
+            conn.execute(
+                "UPDATE inbox_items SET relative_markdown_path = ?, status = 'PROCESSED', "
+                "summary = ?, tags = ? WHERE item_id = ?",
+                (rel_path, note_text[:500], json.dumps(sorted(cluster.shared_tags)), combined_id),
+            )
+
+
+def cmd_inbox_consolidate(args):
+    tracker = StateTracker()
+    store = _inbox_store()
+
+    all_processed = store.list_items(status="PROCESSED")
+    clusters = find_clusters(all_processed)
+
+    if not clusters:
+        print("No candidate clusters found (need >=2 PROCESSED items sharing enough tags).")
+        return
+
+    print(f"\nFound {len(clusters)} candidate cluster(s).\n")
+    for idx, cluster in enumerate(clusters, start=1):
+        print("=" * 60)
+        print(f"Cluster {idx}")
+        print(f"Project:     {cluster.project_key or '(unlinked -- will become a new inbox item)'}")
+        print(f"Shared tags: {', '.join(sorted(cluster.shared_tags)) or '(none fully shared)'}")
+        print(f"Items:       {len(cluster.items)}")
+        for item in cluster.items:
+            print(f"  [{item['item_id']}] {item['title'] or '(untitled)'} -- {item['summary']}")
+        print()
+        print("Proposed consolidated note:")
+        print("-" * 60)
+        print(build_consolidated_note(cluster))
+        print("-" * 60)
+
+        confirmed = input("Consolidate these items? [y/N]: ").strip().lower() in ("y", "yes")
+        if not confirmed:
+            print("Skipped.\n")
+            continue
+
+        try:
+            _write_consolidated_note(tracker, store, cluster)
+        except Exception as e:
+            # Atomicity: write failed, so originals stay exactly as they
+            # were -- PROCESSED, not archived. Nothing disappears.
+            print(f"ERROR: consolidation write failed, originals left untouched: {e}\n")
+            continue
+
+        for item in cluster.items:
+            store.archive(item["item_id"])
+        print(f"Consolidated and archived {len(cluster.items)} item(s).\n")
 
 
 def cmd_resume(args):
@@ -445,6 +555,12 @@ def main():
     p_inbox_archive = subparsers.add_parser("inbox-archive", help="Archive an inbox item")
     p_inbox_archive.add_argument("item_id")
     p_inbox_archive.set_defaults(func=cmd_inbox_archive)
+
+    p_inbox_consolidate = subparsers.add_parser(
+        "inbox-consolidate",
+        help="Find and merge similar PROCESSED inbox items (Jaccard tag similarity, preview-first)",
+    )
+    p_inbox_consolidate.set_defaults(func=cmd_inbox_consolidate)
 
     p_resume = subparsers.add_parser("resume", help="Show active task state and context")
     p_resume.set_defaults(func=cmd_resume)

@@ -29,7 +29,13 @@ class ProjectMemory:
             return f"ERROR: Access denied by policy. {e}"
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(f"\n## {note}\n" if note.startswith("#") else f"\n{note}\n")
+            # Pre-existing bug fixed here: this used to add a "## "
+            # prefix WHEN the note already started with "#", producing
+            # "## ## Consolidated..." -- backwards. A note that already
+            # starts with "#" is already formatted as a heading by its
+            # caller (e.g. build_consolidated_note) and needs no prefix;
+            # only a plain-text note gets one added.
+            f.write(f"\n{note}\n" if note.startswith("#") else f"\n## {note}\n")
         return f"Note added to {project_relative_root}."
 
     @classmethod
