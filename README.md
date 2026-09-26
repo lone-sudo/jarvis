@@ -62,6 +62,15 @@ jarvis inbox-consolidate
 #   new plain inbox item instead — an AI's suggestion never grants write access to project memory
 # - Originals are archived (never deleted) only AFTER a successful write — a failed write
 #   leaves the originals untouched
+
+# V2 completion: session/task consolidation ("nightly wrap-up", manual only)
+jarvis session-consolidate
+# Finds COMPLETED sessions not yet consolidated. Ownership is derived from the session's
+# tasks (every task already has a mandatory project_key) -- a session consolidates only if
+# ALL its tasks agree on one project; sessions with no tasks or tasks spanning multiple
+# projects are flagged and skipped, never guessed at. Preview-first, [y/N] confirm, and
+# the session is marked consolidated ONLY after a successful write to that project's
+# memory -- a failed write leaves it exactly as it was, safe to retry.
 ```
 
 ## Tests

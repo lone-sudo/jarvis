@@ -1,0 +1,14 @@
+-- 004_session_consolidated_flag: adds the idempotency flag for
+-- session-consolidate. A single flag on `sessions` is sufficient --
+-- tasks never need their own consolidated flag, since re-querying
+-- eligible sessions by `consolidated = 0` already prevents a
+-- consolidated session's tasks from ever being reconsidered.
+--
+-- SQLite note: ALTER TABLE ... ADD COLUMN is NOT idempotent the way
+-- CREATE TABLE IF NOT EXISTS is -- running it twice raises "duplicate
+-- column name". The migration runner (state/migration_runner.py)
+-- already guards against re-applying a migration whose number is
+-- <= the current schema_version, so this is safe under normal
+-- operation; it is NOT safe to re-run this file manually outside
+-- that runner.
+ALTER TABLE sessions ADD COLUMN consolidated INTEGER NOT NULL DEFAULT 0;

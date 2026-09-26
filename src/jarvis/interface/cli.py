@@ -11,6 +11,7 @@ from jarvis.memory.markdown import ProjectMemory
 from jarvis.memory.inbox_markdown import InboxMarkdown
 from jarvis.memory.inbox_prompt import build_classification_prompt
 from jarvis.memory.consolidation import find_clusters, build_consolidated_note
+from jarvis.state.session_consolidation import build_candidate, build_consolidated_note as build_session_note
 from jarvis.providers.base import ManualClipboardProvider
 from jarvis.policy.rules import SecurityPolicy
 from jarvis.policy.url_validation import URLPolicyViolation
@@ -436,6 +437,78 @@ def cmd_inbox_consolidate(args):
         print(f"Consolidated and archived {len(cluster.items)} item(s).\n")
 
 
+def cmd_session_consolidate(args):
+    tracker = StateTracker()
+
+    from jarvis.state.database import get_connection
+    with get_connection(tracker.db_path) as conn:
+        sessions = [dict(r) for r in conn.execute(
+            "SELECT * FROM sessions WHERE status = 'COMPLETED' AND consolidated = 0"
+        ).fetchall()]
+
+    if not sessions:
+        print("No eligible sessions found (need status=COMPLETED and not already consolidated).")
+        return
+
+    print(f"\nFound {len(sessions)} completed, unconsolidated session(s).\n")
+    consolidated_count = 0
+    for session in sessions:
+        with get_connection(tracker.db_path) as conn:
+            tasks = [dict(r) for r in conn.execute(
+                "SELECT * FROM tasks WHERE session_id = ?", (session["session_id"],)
+            ).fetchall()]
+
+        candidate = build_candidate(session, tasks)
+
+        print("=" * 60)
+        print(f"Session: {session['session_id']} -- {session['primary_goal']}")
+
+        if candidate.project_key is None:
+            print(f"SKIPPED: {candidate.ineligible_reason}")
+            print("(Not consolidated -- ownership must be unambiguous. No project data was touched.)\n")
+            continue
+
+        print(f"Project: {candidate.project_key}")
+        print(f"Tasks:   {len(candidate.tasks)}")
+        for task in candidate.tasks:
+            print(f"  [{task['status']}] {task['title']}")
+        print()
+        note_text = build_session_note(candidate)
+        print("Proposed consolidated note:")
+        print("-" * 60)
+        print(note_text)
+        print("-" * 60)
+
+        confirmed = input("Consolidate this session? [y/N]: ").strip().lower() in ("y", "yes")
+        if not confirmed:
+            print("Skipped.\n")
+            continue
+
+        project_root = tracker.get_project_root(candidate.project_key)
+        if not project_root:
+            print(f"ERROR: project '{candidate.project_key}' is not registered -- cannot write, skipping.\n")
+            continue
+
+        write_result = ProjectMemory.append_note(project_root, note_text)
+        if "denied by policy" in write_result.lower() or write_result.startswith("ERROR"):
+            # Atomicity: write failed -- session stays exactly as it was,
+            # NOT marked consolidated. Nothing disappears, nothing is
+            # silently half-done.
+            print(f"ERROR: write failed, session left unconsolidated: {write_result}\n")
+            continue
+
+        # Single UPDATE on one row -- inherently atomic in SQLite, and
+        # only runs after the write above has already succeeded. Tasks
+        # themselves are never modified; re-querying by consolidated=0
+        # is what makes re-running this command safe (idempotent).
+        with get_connection(tracker.db_path) as conn:
+            conn.execute("UPDATE sessions SET consolidated = 1 WHERE session_id = ?", (session["session_id"],))
+        consolidated_count += 1
+        print(f"Consolidated session {session['session_id']}.\n")
+
+    print(f"Done. {consolidated_count} session(s) consolidated.")
+
+
 def cmd_resume(args):
     tracker = StateTracker()
     active_tasks = tracker.get_active_tasks()
@@ -561,6 +634,12 @@ def main():
         help="Find and merge similar PROCESSED inbox items (Jaccard tag similarity, preview-first)",
     )
     p_inbox_consolidate.set_defaults(func=cmd_inbox_consolidate)
+
+    p_session_consolidate = subparsers.add_parser(
+        "session-consolidate",
+        help="Wrap up COMPLETED sessions into their project's memory (preview-first, manual only)",
+    )
+    p_session_consolidate.set_defaults(func=cmd_session_consolidate)
 
     p_resume = subparsers.add_parser("resume", help="Show active task state and context")
     p_resume.set_defaults(func=cmd_resume)

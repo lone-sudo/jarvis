@@ -41,12 +41,24 @@ def _split_statements(sql: str) -> list[str]:
 
 def _discover_migrations() -> list[tuple[int, Path]]:
     migrations = []
+    seen: dict[int, Path] = {}
     for f in sorted(MIGRATIONS_DIR.glob("*.sql")):
         num_str = f.stem.split("_", 1)[0]
         try:
             num = int(num_str)
         except ValueError:
             continue
+        if num in seen:
+            # Found via real testing, not assumed: two migration files
+            # sharing a number would otherwise have one silently
+            # skipped forever (whichever sorts second), rather than
+            # failing loudly -- a real landmine if two contributors
+            # independently add a same-numbered migration.
+            raise MigrationError(
+                f"Duplicate migration number {num}: both '{seen[num].name}' and '{f.name}' claim it. "
+                f"Rename one before proceeding -- refusing to guess which is authoritative."
+            )
+        seen[num] = f
         migrations.append((num, f))
     return sorted(migrations, key=lambda pair: pair[0])
 

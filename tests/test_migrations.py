@@ -12,6 +12,25 @@ def real_migrations_content():
     return list(runner.MIGRATIONS_DIR.glob("*.sql"))
 
 
+@pytest.fixture
+def legacy_era_migrations_content():
+    """
+    ONLY the migrations that existed before the migration system itself
+    was introduced (001+002 -- see build-log 0007). A genuinely legacy
+    pre-migration-system database can only ever have this shape; any
+    database containing content from migration 003 or later would
+    necessarily have been created THROUGH the runner, meaning it
+    already has a schema_version row. Using "all current migrations"
+    here (as an earlier version of this fixture did) was itself a bug:
+    it silently broke the moment a later migration (004, ALTER TABLE,
+    not idempotent) was added, because re-applying an ALTER TABLE the
+    legacy-simulation had already baked in via raw executescript
+    correctly failed with "duplicate column" -- a real signal that the
+    test no longer represented a real scenario, not a bug in 004 itself.
+    """
+    return [f for f in runner.MIGRATIONS_DIR.glob("*.sql") if f.stem.split("_", 1)[0] in ("001", "002")]
+
+
 def test_fresh_database_applies_all_migrations(tmp_path):
     db_path = tmp_path / "fresh.db"
     final_version = runner.apply_pending_migrations(db_path)
@@ -31,7 +50,7 @@ def test_applying_twice_is_idempotent(tmp_path):
     assert v1 == v2
 
 
-def test_legacy_database_migrates_without_data_loss(tmp_path, real_migrations_content):
+def test_legacy_database_migrates_without_data_loss(tmp_path, legacy_era_migrations_content):
     """
     The exact scenario that matters most: a real V2 database created
     by the OLD executescript(schema.sql) path, with real user data,
@@ -39,7 +58,7 @@ def test_legacy_database_migrates_without_data_loss(tmp_path, real_migrations_co
     that data.
     """
     db_path = tmp_path / "legacy.db"
-    combined_sql = "\n".join(f.read_text() for f in sorted(real_migrations_content))
+    combined_sql = "\n".join(f.read_text() for f in sorted(legacy_era_migrations_content))
     conn = sqlite3.connect(db_path)
     conn.executescript(combined_sql)
     conn.execute("INSERT INTO sessions (session_id, primary_goal) VALUES ('SES-REAL', 'real data')")
@@ -62,7 +81,8 @@ def test_failed_migration_rolls_back_and_does_not_advance_version(tmp_path, monk
     test_dir.mkdir()
     for f in runner.MIGRATIONS_DIR.glob("*.sql"):
         shutil.copy(f, test_dir / f.name)
-    (test_dir / "003_broken.sql").write_text(
+    real_max = max(num for num, _ in runner._discover_migrations())
+    (test_dir / "999_broken.sql").write_text(
         "CREATE TABLE should_not_persist (x INTEGER);\n"
         "CREATE TABLE this is not valid sql;\n"
     )
@@ -74,7 +94,7 @@ def test_failed_migration_rolls_back_and_does_not_advance_version(tmp_path, monk
 
     conn = sqlite3.connect(db_path)
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == 2  # not advanced to 3
+    assert version == real_max  # every real migration applied; 999 failed and did not advance past it
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "should_not_persist" not in tables  # no partial application
 
@@ -84,7 +104,8 @@ def test_retry_after_fixed_migration_succeeds(tmp_path, monkeypatch):
     test_dir.mkdir()
     for f in runner.MIGRATIONS_DIR.glob("*.sql"):
         shutil.copy(f, test_dir / f.name)
-    broken_path = test_dir / "003_broken.sql"
+    real_max = max(num for num, _ in runner._discover_migrations())
+    broken_path = test_dir / "999_broken.sql"
     broken_path.write_text("CREATE TABLE t (x INTEGER);\nCREATE TABLE this is not valid sql;\n")
     monkeypatch.setattr(runner, "MIGRATIONS_DIR", test_dir)
 
@@ -96,7 +117,7 @@ def test_retry_after_fixed_migration_succeeds(tmp_path, monkeypatch):
     # Jarvis were restarted after the user corrected the problem.
     broken_path.write_text("CREATE TABLE t (x INTEGER);\nINSERT INTO t VALUES (1);\n")
     final_version = runner.apply_pending_migrations(db_path)
-    assert final_version == 3
+    assert final_version == 999  # the injected migration's own number, applied last
 
     conn = sqlite3.connect(db_path)
     assert conn.execute("SELECT * FROM t").fetchall() == [(1,)]
