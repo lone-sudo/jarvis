@@ -52,6 +52,9 @@ jarvis network-list                          # see what's allowed (starts empty)
 jarvis network-allow example.com             # explicitly allow a domain
 jarvis save --url "https://example.com/article" --title "..." --fetch  # single HTTPS request, confirmed, bounded
 # plain `jarvis save --url ...` WITHOUT --fetch never makes a network request — that stays the default
+# text/html responses are automatically stripped of script/nav/header/footer/aside boilerplate
+# (stdlib html.parser only — trafilatura evaluated and rejected for its lxml/courlan/htmldate
+# dependency footprint) before being stored — the inbox never holds raw HTML soup
 
 # V2 completion: consolidation (Jaccard tag similarity, preview-first, manual only)
 jarvis inbox-consolidate

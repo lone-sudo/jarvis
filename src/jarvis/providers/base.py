@@ -1,3 +1,5 @@
+from typing import Protocol, runtime_checkable
+
 from jarvis.policy.validator import PolicyValidator, PolicyViolation
 from jarvis.state.tracker import StateTracker
 
@@ -11,6 +13,53 @@ except Exception:
     # means the whole CLI fails to start on such a machine, not just the
     # provider adapter. Fall back to manual copy/paste instead of crashing.
     _CLIPBOARD_AVAILABLE = False
+
+
+@runtime_checkable
+class Provider(Protocol):
+    """
+    The entire contract any provider needs to satisfy -- structural
+    typing (a Protocol, not an ABC), so ManualClipboardProvider
+    conforms with zero changes and a future API-based provider only
+    needs this one method, nothing more. Deliberately minimal per the
+    converged review: no registry, no routing, no fallback chains --
+    this exists solely so dispatch_and_track (below) isn't hardcoded
+    to one concrete class.
+    """
+
+    def dispatch_prompt(self, prompt_text: str) -> str: ...
+
+
+def dispatch_and_track(
+    provider: Provider, tracker: StateTracker, task_id: str, prompt_text: str, *, mark_done: bool = False
+) -> str:
+    """
+    Wraps any Provider's dispatch_prompt() with the task's state
+    transitions, so the state machine is never out of sync with what's
+    actually happening:
+
+      IN_PROGRESS/PENDING -> AWAITING_USER   the instant the prompt is
+                                              handed off to the provider
+                                              -- not after the fact.
+      AWAITING_USER -> IN_PROGRESS or DONE   only once a response has
+                                              actually come back.
+                                              mark_done=True is the
+                                              caller's explicit choice,
+                                              never inferred from the
+                                              response text.
+
+    If the response never comes back (process killed while waiting),
+    the task is left at AWAITING_USER -- exactly the state `jarvis
+    resume` should surface, not silently reset to something else.
+
+    Standalone function (not a method) so it works with any Provider,
+    not just ManualClipboardProvider -- this is the one generalization
+    this round's review asked for, nothing more.
+    """
+    tracker.update_task_status(task_id, "AWAITING_USER")
+    response = provider.dispatch_prompt(prompt_text)
+    tracker.update_task_status(task_id, "DONE" if mark_done else "IN_PROGRESS")
+    return response
 
 
 class ManualClipboardProvider:
@@ -88,26 +137,9 @@ class ManualClipboardProvider:
         self, tracker: StateTracker, task_id: str, prompt_text: str, *, mark_done: bool = False
     ) -> str:
         """
-        Wraps dispatch_prompt() with the task's state transitions, so the
-        state machine is never out of sync with what's actually happening:
-
-          IN_PROGRESS/PENDING -> AWAITING_USER   the instant the prompt is
-                                                  handed off (clipboard
-                                                  populated / printed) —
-                                                  not after the fact.
-          AWAITING_USER -> IN_PROGRESS or DONE   only once Lone has
-                                                  explicitly pasted the
-                                                  response back into the
-                                                  CLI. mark_done=True is
-                                                  the caller's explicit
-                                                  choice, never inferred
-                                                  from the response text.
-
-        If the response never comes back (process killed while waiting),
-        the task is left at AWAITING_USER — exactly the state `jarvis
-        resume` should surface, not silently reset to something else.
+        Thin backward-compatible wrapper: existing call sites
+        (interface/cli.py::cmd_ask_ai) keep working unchanged. New code
+        should prefer the standalone dispatch_and_track() function
+        above, which works with any Provider.
         """
-        tracker.update_task_status(task_id, "AWAITING_USER")
-        response = self.dispatch_prompt(prompt_text)
-        tracker.update_task_status(task_id, "DONE" if mark_done else "IN_PROGRESS")
-        return response
+        return dispatch_and_track(self, tracker, task_id, prompt_text, mark_done=mark_done)

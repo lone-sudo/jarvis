@@ -7,6 +7,7 @@ from jarvis.tools.base import run_logged
 from jarvis.tools.git import GitInspector
 from jarvis.tools.fs import FileSystemInspector
 from jarvis.tools import network as network_tool
+from jarvis.tools.text_extraction import extract_readable_text
 from jarvis.memory.markdown import ProjectMemory
 from jarvis.memory.inbox_markdown import InboxMarkdown
 from jarvis.memory.inbox_prompt import build_classification_prompt
@@ -195,7 +196,16 @@ def cmd_save(args):
             print(f"ERROR: fetch failed: {e}")
             return
 
-        content = result.body_text
+        # HTML gets stripped of boilerplate before it ever reaches the
+        # inbox or a classification prompt -- stdlib-only (see
+        # tools/text_extraction.py; trafilatura was evaluated and
+        # rejected for its lxml/courlan/htmldate/justext dependency
+        # footprint). text/plain responses pass through unchanged since
+        # there's no markup to strip.
+        if result.content_type == "text/html":
+            content = extract_readable_text(result.body_text)
+        else:
+            content = result.body_text
         # Provenance recorded through the existing executions log, per
         # the review -- no separate logging mechanism.
         tracker = StateTracker()
