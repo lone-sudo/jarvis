@@ -38,6 +38,15 @@ jarvis git-commit --task TSK-XXXXXXXX --project structural-rcc-suite --message "
 # (copies to clipboard, waits for you to paste the response back — no API, no cost)
 jarvis ask-ai --task TSK-XXXXXXXX --provider Claude_Web "Explain this stack trace: ..."
 
+# Optional: a real Gemini API backend, tested with mocked responses, opt-in only.
+# Requires GEMINI_API_KEY set as an environment variable (never read from source/config).
+# Endpoint/format confirmed against Google's own docs at write time; free-tier eligibility
+# for YOUR account is NOT verified by this code -- confirm that yourself before relying on it.
+jarvis ask-ai --task TSK-XXXXXXXX --backend gemini "Explain this stack trace: ..."
+jarvis inbox-process --backend gemini
+# Omitting --backend (or passing --backend manual) is the exact unchanged default --
+# no automatic fallback between backends either way.
+
 # V2: content inbox (manual capture only — Jarvis never fetches a URL on its own)
 jarvis save --url "https://example.com/some-article" --title "Article title" --note "why you saved it"
 jarvis save --text "raw text or a transcript you pasted in yourself" --title "quick note"
@@ -94,4 +103,19 @@ src/jarvis/
 ├── tools/        # Read-only git + filesystem inspection, policy-gated
 ├── providers/    # Manual clipboard-based AI dispatch (no API, no cost)
 └── interface/    # CLI
+```
+
+## Telegram interface (read-only, see ADR-0004)
+
+```bash
+# One-time setup: create a bot via @BotFather on Telegram, get your token,
+# and find your own numeric Telegram user id (never a @username).
+$env:TELEGRAM_BOT_TOKEN = "your-real-token"        # this PowerShell session only
+$env:TELEGRAM_ALLOWED_USER_ID = "your-numeric-id"
+
+jarvis telegram-start
+# Foreground only -- runs until Ctrl+C. Message your bot from your phone:
+#   /resume  /inbox [status]  /help
+# No writes, no fetches, no confirmations -- read-only by design. Only your
+# allowlisted account gets a reply; everyone else is silently ignored.
 ```

@@ -100,12 +100,25 @@ def cmd_git_commit(args):
     print(result)
 
 
+def _select_backend(backend: str, provider_label: str):
+    """
+    Explicit selection only -- no automatic routing, no fallback. The
+    default ("manual") is exactly what every call site used before this
+    flag existed, so omitting --backend entirely is a no-op change.
+    """
+    if backend == "gemini":
+        from jarvis.providers.gemini_api import GeminiAPIProvider
+        return GeminiAPIProvider(provider_name=provider_label)
+    return ManualClipboardProvider(provider_name=provider_label)
+
+
 def cmd_ask_ai(args):
     tracker = StateTracker()
-    provider = ManualClipboardProvider(provider_name=args.provider)
+    provider = _select_backend(args.backend, args.provider)
+    from jarvis.providers.base import dispatch_and_track
     response = run_logged(
         tracker, args.task, f"provider:{args.provider}", "EXTERNAL",
-        lambda: provider.dispatch_and_track(tracker, args.task, args.prompt, mark_done=args.done),
+        lambda: dispatch_and_track(provider, tracker, args.task, args.prompt, mark_done=args.done),
         input_summary=args.prompt[:200],
     )
     print("\n--- Response received ---")
@@ -248,7 +261,7 @@ def cmd_inbox_process(args):
     """
     tracker = StateTracker()
     store = _inbox_store()
-    provider = ManualClipboardProvider(provider_name=args.provider)
+    provider = _select_backend(args.backend, args.provider)
     known_projects = _known_project_keys(tracker)
 
     unprocessed = store.list_items(status="UNPROCESSED")
@@ -447,6 +460,21 @@ def cmd_inbox_consolidate(args):
         print(f"Consolidated and archived {len(cluster.items)} item(s).\n")
 
 
+def cmd_telegram_start(args):
+    """
+    Foreground, read-only Telegram interface. Deliberately a normal
+    blocking command: it runs until Ctrl+C, then exits. No daemon, no
+    scheduler, nothing persisted.
+    """
+    from jarvis.interface import telegram_bot
+    try:
+        config = telegram_bot.load_config_from_env()
+    except telegram_bot.TelegramConfigError as e:
+        print(f"ERROR: {e}")
+        return
+    telegram_bot.run_bot(config)
+
+
 def cmd_session_consolidate(args):
     tracker = StateTracker()
 
@@ -600,9 +628,13 @@ def main():
     p_commit.add_argument("--message", required=True, help="Commit message")
     p_commit.set_defaults(func=cmd_git_commit)
 
-    p_ask = subparsers.add_parser("ask-ai", help="[EXTERNAL] Dispatch a prompt via manual clipboard provider")
+    p_ask = subparsers.add_parser("ask-ai", help="Dispatch a prompt via a provider (manual clipboard by default)")
     p_ask.add_argument("--task", required=True, help="Task ID to transition through AWAITING_USER")
-    p_ask.add_argument("--provider", default="AI_Web", help="Provider label, e.g. Claude_Web, ChatGPT_Web")
+    p_ask.add_argument("--provider", default="AI_Web", help="Provider LABEL only (e.g. Claude_Web, ChatGPT_Web) -- does not select a backend, see --backend")
+    p_ask.add_argument("--backend", default="manual", choices=["manual", "gemini"],
+                       help="Which implementation actually handles the call. 'manual' (default) is the existing "
+                            "clipboard round-trip -- unchanged. 'gemini' makes a real network call via GEMINI_API_KEY; "
+                            "explicit opt-in only, never silently switched.")
     p_ask.add_argument("prompt", help="Prompt text to dispatch")
     p_ask.add_argument("--done", action="store_true", help="Mark task DONE after response (default: IN_PROGRESS)")
     p_ask.set_defaults(func=cmd_ask_ai)
@@ -622,8 +654,10 @@ def main():
     p_net_list = subparsers.add_parser("network-list", help="List domains on the outbound-fetch allowlist")
     p_net_list.set_defaults(func=cmd_network_list)
 
-    p_inbox_process = subparsers.add_parser("inbox-process", help="Classify UNPROCESSED inbox items via manual AI dispatch")
-    p_inbox_process.add_argument("--provider", default="AI_Web", help="Provider label, e.g. Claude_Web, ChatGPT_Web")
+    p_inbox_process = subparsers.add_parser("inbox-process", help="Classify UNPROCESSED inbox items via a provider (manual by default)")
+    p_inbox_process.add_argument("--provider", default="AI_Web", help="Provider LABEL only, e.g. Claude_Web, ChatGPT_Web")
+    p_inbox_process.add_argument("--backend", default="manual", choices=["manual", "gemini"],
+                                 help="'manual' (default, unchanged) or 'gemini' (real API call, explicit opt-in)")
     p_inbox_process.set_defaults(func=cmd_inbox_process)
 
     p_inbox = subparsers.add_parser("inbox", help="List inbox items")
@@ -644,6 +678,12 @@ def main():
         help="Find and merge similar PROCESSED inbox items (Jaccard tag similarity, preview-first)",
     )
     p_inbox_consolidate.set_defaults(func=cmd_inbox_consolidate)
+
+    p_telegram = subparsers.add_parser(
+        "telegram-start",
+        help="Run the READ-ONLY Telegram interface in the foreground (Ctrl+C to stop). Needs TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID.",
+    )
+    p_telegram.set_defaults(func=cmd_telegram_start)
 
     p_session_consolidate = subparsers.add_parser(
         "session-consolidate",
