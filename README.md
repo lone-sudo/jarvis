@@ -1,7 +1,8 @@
 # Jarvis — Personal AI Operating Layer
 
-Prototype Milestone 001. See `docs/adrs/` for frozen architecture decisions and
-`docs/build-logs/` for the implementation journey.
+See [`docs/JOURNEY.md`](docs/JOURNEY.md) for the full story of how this was built — the real
+engineering case study, including the mistakes. `docs/adrs/` holds frozen architecture decisions;
+`docs/build-logs/` holds the detailed, per-milestone record `JOURNEY.md` is narrated from.
 
 ## Setup
 
