@@ -31,7 +31,8 @@ decides what actually runs.
    current_step_index, max_steps, plan_json, created_at, updated_at`. `plan_json` is canonical; the
    other columns are same-statement copies for filtering. `timeout_seconds` and `checkpoint_id` live in the JSON.
 
-## Implementation decisions made while building — **please confirm or reverse**
+## Implementation decisions made while building — **confirmed by Lone 2026-10-09 (a–g as written)**
+Decision (e) is accepted as is: the engine never marks a task `DONE`. A command to close a task is deferred, not rejected; revisit when a real workflow needs it.
 These go beyond the six above. Each is a deliberate choice with a reason, not an accident.
 
 | # | Decision | Why | Cost |
