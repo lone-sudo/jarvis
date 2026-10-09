@@ -10,7 +10,10 @@ All verifiers are strictly read-only and must never mutate project files.
 Types are imported directly from jarvis.core.plan (never redefined).
 """
 
+import ntpath
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -18,6 +21,116 @@ from typing import Any
 from jarvis.core.plan import ExecutionStep, VerificationContext, VerificationResult
 from jarvis.policy.rules import SecurityPolicy
 from jarvis.tools.git import GitInspector
+
+# Explicitly rejected pytest argument prefixes (ADR-0005 hardening)
+REJECTED_PYTEST_ARG_PREFIXES = (
+    "--basetemp",
+    "--junitxml",
+    "--cache-dir",
+    "-o",
+    "-p",
+    "-c",
+    "--rootdir",
+    "--confcutdir",
+    "--import-mode",
+)
+
+# Explicitly safe standalone pytest flags
+SAFE_PYTEST_FLAGS = {
+    "-v", "-vv", "-vvv", "--verbose",
+    "-q", "-qq", "--quiet",
+    "-s", "--capture=no",
+    "-x", "--exitfirst",
+    "--lf", "--last-failed",
+    "--ff", "--failed-first",
+    "-l", "--showlocals",
+    "--strict-markers",
+    "--disable-warnings",
+}
+
+# Explicitly safe pytest options that accept a value
+SAFE_PYTEST_OPTIONS = {
+    "-k", "--keyword",
+    "-m", "--markers",
+    "--maxfail",
+    "--tb",
+    "--durations",
+    "-r",
+}
+
+
+def _is_absolute_path_arg(arg: str) -> bool:
+    """Checks whether an argument string represents an absolute path on POSIX or Windows."""
+    if Path(arg).is_absolute() or ntpath.isabs(arg):
+        return True
+    if arg.startswith(("/", "\\")) or bool(re.match(r"^[a-zA-Z]:[\\/]", arg)):
+        return True
+    return False
+
+
+def _validate_pytest_args(raw_args: list[str]) -> list[str]:
+    """
+    Validates that pytest arguments match an explicit safe list and rejects
+    any dangerous, configuration-overriding, or absolute-path arguments.
+    """
+    if not isinstance(raw_args, list) or not all(isinstance(a, str) for a in raw_args):
+        raise ValueError("pytest_target: 'args' must be a list of strings.")
+
+    i = 0
+    validated: list[str] = []
+    while i < len(raw_args):
+        arg = raw_args[i]
+
+        # 1. Reject absolute paths
+        if _is_absolute_path_arg(arg):
+            raise PermissionError(
+                f"pytest_target: argument '{arg}' is an absolute path, rejected by policy."
+            )
+
+        # 2. Reject forbidden prefixes
+        for rej in REJECTED_PYTEST_ARG_PREFIXES:
+            if arg == rej or arg.startswith(rej + "="):
+                raise PermissionError(
+                    f"pytest_target: argument '{arg}' is forbidden by policy."
+                )
+
+        # 3. Check allowed safe list
+        if arg in SAFE_PYTEST_FLAGS:
+            validated.append(arg)
+            i += 1
+        elif arg in SAFE_PYTEST_OPTIONS:
+            if i + 1 >= len(raw_args):
+                raise ValueError(f"pytest_target: option '{arg}' requires a value.")
+            val = raw_args[i + 1]
+            if _is_absolute_path_arg(val):
+                raise PermissionError(
+                    f"pytest_target: argument '{val}' for option '{arg}' is an absolute path, rejected by policy."
+                )
+            for rej in REJECTED_PYTEST_ARG_PREFIXES:
+                if val == rej or val.startswith(rej + "="):
+                    raise PermissionError(
+                        f"pytest_target: argument '{val}' is forbidden by policy."
+                    )
+            validated.extend([arg, val])
+            i += 2
+        elif any(arg.startswith(opt + "=") for opt in SAFE_PYTEST_OPTIONS):
+            opt, val = arg.split("=", 1)
+            if _is_absolute_path_arg(val):
+                raise PermissionError(
+                    f"pytest_target: argument '{val}' for option '{opt}' is an absolute path, rejected by policy."
+                )
+            for rej in REJECTED_PYTEST_ARG_PREFIXES:
+                if val == rej or val.startswith(rej + "="):
+                    raise PermissionError(
+                        f"pytest_target: argument '{val}' is forbidden by policy."
+                    )
+            validated.append(arg)
+            i += 1
+        else:
+            raise PermissionError(
+                f"pytest_target: argument '{arg}' is not in the allowed safe args list."
+            )
+    return validated
 
 
 class FileContentVerifier:
@@ -40,7 +153,7 @@ class FileContentVerifier:
             if not isinstance(raw_path, str) or not raw_path.strip():
                 raise ValueError("file_content: 'path' must be a non-empty string.")
             p = Path(raw_path)
-            if p.is_absolute() or ".." in p.parts:
+            if p.is_absolute() or ntpath.isabs(raw_path) or ".." in p.parts:
                 raise PermissionError(
                     f"file_content: path '{raw_path}' attempts path traversal or is absolute."
                 )
@@ -127,6 +240,7 @@ class PytestTargetVerifier:
     """
     Executes a targeted pytest run within project_root.
     Respects ctx.time_remaining as the subprocess timeout budget.
+    Runs pytest with '-p no:cacheprovider' and 'PYTHONDONTWRITEBYTECODE=1'.
     Preserves complete stdout and stderr diagnostics upon test failure.
     Strictly read-only.
     """
@@ -145,7 +259,7 @@ class PytestTargetVerifier:
             if not isinstance(raw_target, str) or not raw_target.strip():
                 raise ValueError("pytest_target: 'target' must be a non-empty string.")
             p = Path(raw_target)
-            if p.is_absolute() or ".." in p.parts:
+            if p.is_absolute() or ntpath.isabs(raw_target) or ".." in p.parts:
                 raise PermissionError(
                     f"pytest_target: target '{raw_target}' attempts path traversal or is absolute."
                 )
@@ -153,11 +267,9 @@ class PytestTargetVerifier:
         else:
             self.target = ""
 
-        args = spec.get("args")
-        if args is not None:
-            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-                raise ValueError("pytest_target: 'args' must be a list of strings.")
-            self.args: list[str] = args
+        raw_args = spec.get("args")
+        if raw_args is not None:
+            self.args: list[str] = _validate_pytest_args(raw_args)
         else:
             self.args = []
 
@@ -191,11 +303,20 @@ class PytestTargetVerifier:
                 detail=f"Subprocess timeout budget insufficient ({sub_timeout:.1f}s).",
             )
 
-        cmd = [sys.executable, "-m", "pytest"]
+        cmd = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+        ]
         if self.target:
             cmd.append(self.target)
         if self.args:
             cmd.extend(self.args)
+
+        env = dict(os.environ)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         try:
             proc = subprocess.run(
@@ -204,6 +325,7 @@ class PytestTargetVerifier:
                 capture_output=True,
                 text=True,
                 timeout=sub_timeout,
+                env=env,
             )
             if proc.returncode == 0:
                 summary = proc.stdout.strip()
@@ -298,7 +420,12 @@ class GitCommitVerifier:
 
         if self.expect_clean:
             status = GitInspector._run(["status", "--porcelain"], ctx.project_root)
-            if status and not status.startswith("ERROR:"):
+            if status.startswith("ERROR:"):
+                return VerificationResult(
+                    ok=False,
+                    detail=f"Git status failed: {status}",
+                )
+            if status:
                 return VerificationResult(
                     ok=False,
                     detail=f"Commit {commit_hash[:8]} created, but working directory is dirty:\n{status}",

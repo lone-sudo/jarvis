@@ -136,16 +136,17 @@ def test_file_content_verifier_failures_and_diagnostics(test_env):
     assert "File 'empty.txt' is empty" in res4.detail
 
 
-def test_file_content_verifier_policy_breach(test_env):
+def test_file_content_verifier_policy_breach(test_env, tmp_path):
     ctx = test_env["ctx"]
 
     # Traversal in spec path
     with pytest.raises(PermissionError, match="attempts path traversal or is absolute"):
         FileContentVerifier({"type": "file_content", "path": "../outside.txt"})
 
-    # Absolute path in spec path
+    # Absolute path in spec path (platform-independent)
+    abs_outside = str((tmp_path / "outside_calc.txt").resolve())
     with pytest.raises(PermissionError, match="attempts path traversal or is absolute"):
-        FileContentVerifier({"type": "file_content", "path": "C:/Windows/System32/calc.exe"})
+        FileContentVerifier({"type": "file_content", "path": abs_outside})
 
     # Traversal via step params at verify time
     v = FileContentVerifier({"type": "file_content"})
@@ -243,15 +244,56 @@ def test_pytest_target_verifier_timeout(test_env):
     assert "Timeout budget exhausted" in res_exhausted.detail
 
 
-def test_pytest_target_verifier_policy_breach(test_env):
+def test_pytest_target_verifier_policy_breach(test_env, tmp_path):
     ctx = test_env["ctx"]
 
     # Traversal in target spec
     with pytest.raises(PermissionError, match="attempts path traversal or is absolute"):
         PytestTargetVerifier({"type": "pytest_target", "target": "../../tests"})
 
+    # Absolute path in target spec (platform-independent)
+    abs_target = str((tmp_path / "outside_tests").resolve())
     with pytest.raises(PermissionError, match="attempts path traversal or is absolute"):
-        PytestTargetVerifier({"type": "pytest_target", "target": "D:/projects/tests"})
+        PytestTargetVerifier({"type": "pytest_target", "target": abs_target})
+
+
+@pytest.mark.parametrize("bad_arg", [
+    "--basetemp",
+    "--junitxml",
+    "--cache-dir",
+    "-o",
+    "-p",
+    "-c",
+    "--rootdir",
+    "--confcutdir",
+    "--import-mode",
+])
+def test_pytest_target_verifier_rejected_args(bad_arg):
+    with pytest.raises(PermissionError, match="forbidden by policy"):
+        PytestTargetVerifier({"type": "pytest_target", "args": [bad_arg]})
+
+    with pytest.raises(PermissionError, match="forbidden by policy"):
+        PytestTargetVerifier({"type": "pytest_target", "args": [f"{bad_arg}=some_val"]})
+
+
+def test_pytest_target_verifier_basetemp_outside_project_refused(tmp_path):
+    outside_dir = str((tmp_path / "outside_basetemp").resolve())
+    # Separate arg
+    with pytest.raises(PermissionError, match="forbidden by policy|absolute path"):
+        PytestTargetVerifier({"type": "pytest_target", "args": ["--basetemp", outside_dir]})
+
+    # Equals arg
+    with pytest.raises(PermissionError, match="forbidden by policy|absolute path"):
+        PytestTargetVerifier({"type": "pytest_target", "args": [f"--basetemp={outside_dir}"]})
+
+
+def test_pytest_target_verifier_absolute_path_arg_refused(tmp_path):
+    abs_arg = str((tmp_path / "somedir").resolve())
+    with pytest.raises(PermissionError, match="absolute path"):
+        PytestTargetVerifier({"type": "pytest_target", "args": [abs_arg]})
+
+    with pytest.raises(PermissionError, match="absolute path"):
+        PytestTargetVerifier({"type": "pytest_target", "args": ["-k", abs_arg]})
 
 
 # ==============================================================================
@@ -312,6 +354,19 @@ def test_git_commit_verifier_failure_diagnostics(test_env):
     res2 = v2.verify(ExecutionStep(tool="git_commit"), ctx)
     assert res2.ok is False
     assert "working directory is dirty" in res2.detail
+
+    # Git status returning ERROR with expect_clean must fail, not pass
+    from unittest.mock import patch
+    def fake_git(args, cwd):
+        if "status" in args:
+            return "ERROR: git status timed out."
+        return "abc12345\x00fix: small fix"
+
+    with patch("jarvis.tools.git.GitInspector._run", side_effect=fake_git):
+        v3 = GitCommitVerifier({"type": "git_commit", "expect_clean": True})
+        res3 = v3.verify(ExecutionStep(tool="git_commit"), ctx)
+        assert res3.ok is False
+        assert "Git status failed: ERROR: git status timed out." in res3.detail
 
 
 def test_git_commit_verifier_non_git_repo(tmp_path):
