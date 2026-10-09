@@ -1,6 +1,6 @@
 # ADR-0005: Execution Engine — Per-Step Authorization, Targeted Verification, Evidence-Preserving Failure
 
-**Status:** Proposed — sandbox-tested only. Not accepted until Lone has verified it on the real ZBook
+**Status:** Proposed. Read-only path verified on the real ZBook (2026-10-09); write path, checkpoints and rollback still sandbox-tested only, pending `core/verifier.py`. Not accepted until Lone has verified those on the real ZBook (invariant 5: sandbox-verified ≠ real-machine-verified).
 (invariant 5: sandbox-verified ≠ real-machine-verified).
 **Date:** 2026-10-09
 
