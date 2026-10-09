@@ -16,6 +16,10 @@ from jarvis.state.session_consolidation import build_candidate, build_consolidat
 from jarvis.providers.base import ManualClipboardProvider
 from jarvis.policy.rules import SecurityPolicy
 from jarvis.policy.url_validation import URLPolicyViolation
+from jarvis.core.plan import ExecutionPlan, PlanFormatError
+from jarvis.core.engine import EngineError, ExecutionEngine, validate_plan
+from jarvis.core.checkpoint import CheckpointError, rollback as rollback_to_checkpoint
+from jarvis.state.plan_store import PlanNotFound, PlanStore
 
 
 def cmd_init_project(args):
@@ -589,6 +593,131 @@ def cmd_resume(args):
     print("=" * 60 + "\n")
 
 
+def _step_summary(step) -> str:
+    """One-line description of a step that never dumps file contents."""
+    bits = []
+    for key, value in step.params.items():
+        if key == "content":
+            bits.append(f"content=<{len(value)} chars>")
+        else:
+            shown = value if len(value) <= 60 else value[:57] + "..."
+            bits.append(f"{key}={shown!r}")
+    text = f"{step.tool}({', '.join(bits)})"
+    if step.verify:
+        text += f" verify={step.verify['type']}"
+    if step.description:
+        text += f" - {step.description}"
+    return text
+
+
+def cmd_plan_create(args):
+    tracker = StateTracker()
+    store = PlanStore(tracker.db_path)
+
+    # Same rule as --content-file: a plan file must itself live inside the workspace.
+    try:
+        plan_path = SecurityPolicy.resolve_safe_path(args.file)
+    except PermissionError as e:
+        print(f"ERROR: plan file rejected by policy: {e}")
+        return
+    if not plan_path.is_file():
+        print(f"ERROR: plan file '{args.file}' is not a file.")
+        return
+    try:
+        # utf-8-sig: Windows PowerShell 5.1 writes a BOM with `Set-Content -Encoding utf8`,
+        # which plain utf-8 + json.loads rejects. Accepts files with or without one.
+        data = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"ERROR: could not read plan file as JSON: {e}")
+        return
+    if not isinstance(data, dict):
+        print("ERROR: plan file must contain a JSON object.")
+        return
+    if data.get("task_id", args.task) != args.task:
+        print(f"ERROR: plan file names task {data['task_id']} but --task is {args.task}.")
+        return
+    data["task_id"] = args.task
+    if args.max_steps is not None:
+        data["max_steps"] = args.max_steps
+    if args.timeout is not None:
+        data["timeout_seconds"] = args.timeout
+
+    try:
+        plan = ExecutionPlan.from_dict(data, require_state=False)
+        validate_plan(plan)
+        store.create(plan)
+    except ValueError as e:  # PlanFormatError is a ValueError
+        print(f"ERROR: plan rejected: {e}")
+        return
+
+    print(f"Created plan {plan.plan_id} for task {plan.task_id} "
+          f"({len(plan.steps)} steps, max_steps={plan.max_steps}, timeout={plan.timeout_seconds}s)")
+    for i, step in enumerate(plan.steps, start=1):
+        print(f"  {i}. {_step_summary(step)}")
+    print(f"Nothing has run. Review it with `jarvis plan-show {plan.plan_id}`, run it with `jarvis plan-run {plan.plan_id}`.")
+
+
+def cmd_plan_show(args):
+    tracker = StateTracker()
+    store = PlanStore(tracker.db_path)
+    try:
+        plan = store.load(args.plan)
+    except (PlanNotFound, PlanFormatError) as e:
+        print(f"ERROR: {e}")
+        return
+
+    print(f"Plan {plan.plan_id}  task={plan.task_id}  status={plan.status.value}")
+    print(f"  progress: {plan.current_step_index}/{len(plan.steps)} steps   "
+          f"max_steps={plan.max_steps}   timeout={plan.timeout_seconds}s")
+    print(f"  checkpoint: {plan.checkpoint_id or '(none)'}")
+    for i, step in enumerate(plan.steps, start=1):
+        print(f"  {i}. [{step.status.value}] {_step_summary(step)}")
+        if step.error:
+            print(f"       error: {step.error[:300]}")
+
+    if plan.status.value != "BLOCKED":
+        return
+    print(f"\nBLOCKED: {plan.blocked_reason}")
+    d = store.get_failure_diagnostics(plan.plan_id, plan.task_id)
+    if d is None:
+        print("(no saved diagnostics found in the executions log)")
+        return
+    limit = None if args.full else 1500
+
+    def clip(text):
+        text = text or ""
+        return text if limit is None or len(text) <= limit else text[:limit] + f"\n... [clipped, use --full]"
+
+    if d.get("verifier_detail"):
+        print("\nVerifier output:\n" + clip(d["verifier_detail"]))
+    if d.get("traceback"):
+        print("\nTraceback:\n" + clip(d["traceback"]))
+    print("\nWorking tree status at failure:\n" + clip(d.get("git_status")))
+    if d.get("git_diff"):
+        print("\nDiff at failure:\n" + clip(d["git_diff"]))
+    print(f"\nRetry (resumes at step {plan.current_step_index + 1}): jarvis plan-run {plan.plan_id}")
+    if plan.checkpoint_id:
+        print(f"Roll back (previews first, then asks): jarvis rollback --checkpoint {plan.checkpoint_id}")
+
+
+def cmd_plan_run(args):
+    tracker = StateTracker()
+    store = PlanStore(tracker.db_path)
+    engine = ExecutionEngine(tracker, store)
+    try:
+        engine.run(args.plan)
+    except (EngineError, PlanNotFound, PlanFormatError) as e:
+        print(f"ERROR: {e}")
+
+
+def cmd_rollback(args):
+    tracker = StateTracker()
+    try:
+        print(rollback_to_checkpoint(tracker, args.checkpoint))
+    except CheckpointError as e:
+        print(f"ERROR: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="jarvis", description="Jarvis Personal AI Operating Layer")
     subparsers = parser.add_subparsers(dest="command")
@@ -690,6 +819,32 @@ def main():
         help="Wrap up COMPLETED sessions into their project's memory (preview-first, manual only)",
     )
     p_session_consolidate.set_defaults(func=cmd_session_consolidate)
+
+    p_plan_create = subparsers.add_parser(
+        "plan-create", help="Create an execution plan from a JSON file in the workspace (does not run it)"
+    )
+    p_plan_create.add_argument("--task", required=True, help="Task ID (TSK-...) the plan belongs to")
+    p_plan_create.add_argument("--file", required=True, help="Plan JSON file, relative to the workspace root")
+    p_plan_create.add_argument("--max-steps", type=int, default=None, help="Override max_steps (default 5)")
+    p_plan_create.add_argument("--timeout", type=int, default=None, help="Override timeout_seconds (default 120)")
+    p_plan_create.set_defaults(func=cmd_plan_create)
+
+    p_plan_run = subparsers.add_parser(
+        "plan-run", help="[SAFE_WRITE] Run or resume a plan. Each mutating step still asks [y/N] with a diff"
+    )
+    p_plan_run.add_argument("plan", help="Plan ID (PLN-...)")
+    p_plan_run.set_defaults(func=cmd_plan_run)
+
+    p_plan_show = subparsers.add_parser("plan-show", help="Show a plan's steps, status and any saved failure diagnostics")
+    p_plan_show.add_argument("plan", help="Plan ID (PLN-...)")
+    p_plan_show.add_argument("--full", action="store_true", help="Do not clip long diagnostics")
+    p_plan_show.set_defaults(func=cmd_plan_show)
+
+    p_rollback = subparsers.add_parser(
+        "rollback", help="[SAFE_WRITE] Reset a project to a plan's pre-flight checkpoint (previews, then asks [y/N])"
+    )
+    p_rollback.add_argument("--checkpoint", required=True, help="Checkpoint ID (CHK-...)")
+    p_rollback.set_defaults(func=cmd_rollback)
 
     p_resume = subparsers.add_parser("resume", help="Show active task state and context")
     p_resume.set_defaults(func=cmd_resume)

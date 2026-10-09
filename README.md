@@ -35,6 +35,15 @@ jarvis resume
 jarvis write-file --task TSK-XXXXXXXX path/to/file.py --content-file structural-rcc-suite/local_draft.py
 jarvis git-commit --task TSK-XXXXXXXX --project structural-rcc-suite --message "Fix beam calc"
 
+# M002: execution plans (a plan is a short, bounded list of steps -- see ADR-0005)
+# The plan file lives inside the workspace. Creating a plan runs nothing.
+jarvis plan-create --task TSK-XXXXXXXX --file plans/my-plan.json [--max-steps 5] [--timeout 120]
+jarvis plan-show PLN-XXXXXXXX          # steps, status, and (if BLOCKED) the saved failure evidence
+jarvis plan-run PLN-XXXXXXXX           # every write/commit step still shows a diff and asks [y/N]
+# If a step fails, nothing is undone: the plan is BLOCKED, the working tree is left as-is, and
+# re-running plan-run resumes at the failed step. Undoing is a separate, explicit, confirmed step:
+jarvis rollback --checkpoint CHK-XXXXXXXX
+
 # V1: dispatch a prompt to your existing ChatGPT/Claude/Gemini subscription
 # (copies to clipboard, waits for you to paste the response back — no API, no cost)
 jarvis ask-ai --task TSK-XXXXXXXX --provider Claude_Web "Explain this stack trace: ..."
