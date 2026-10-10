@@ -76,24 +76,68 @@ def test_console_command_not_installed_is_ok(monkeypatch):
     assert doctor.check_console_command().status == "OK"
 
 
-def test_console_command_correct_and_stale(monkeypatch):
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "jarvis.exe")
+def test_console_command_runs_help_without_pythonpath(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "jarvis")
+    monkeypatch.setenv("PYTHONPATH", "should-not-reach-command")
+    calls = []
 
-    class EntryPoints:
-        def select(self, **kwargs):
-            return [SimpleNamespace(value="jarvis.interface.cli:main")]
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout="usage: jarvis", stderr="")
 
-    monkeypatch.setattr(doctor.importlib.metadata, "entry_points", lambda: EntryPoints())
-    assert doctor.check_console_command().status == "OK"
+    monkeypatch.setattr(doctor.subprocess, "run", run)
+    result = doctor.check_console_command()
 
-    class StaleEntryPoints:
-        def select(self, **kwargs):
-            return [SimpleNamespace(value="jarvis.cli:main")]
+    assert result.status == "OK"
+    assert calls[0][0] == ["jarvis", "--help"]
+    assert calls[0][1]["capture_output"] is True
+    assert calls[0][1]["timeout"] == 10
+    assert "PYTHONPATH" not in calls[0][1]["env"]
+    assert "shell" not in calls[0][1]
+    assert doctor.os.environ["PYTHONPATH"] == "should-not-reach-command"
 
-    monkeypatch.setattr(doctor.importlib.metadata, "entry_points", lambda: StaleEntryPoints())
+
+def test_console_command_nonzero_exit_warns_with_error_and_fix(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "jarvis")
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr='Traceback (most recent call last):\n  File "jarvis", line 1\nModuleNotFoundError: No module named \'jarvis\'\n',
+        ),
+    )
     result = doctor.check_console_command()
     assert result.status == "WARN"
-    assert "jarvis.interface.cli" in result.detail
+    assert "ModuleNotFoundError: No module named 'jarvis'" in result.detail
+    assert '$env:PYTHONPATH = "src"; python -m jarvis.interface.cli' in result.detail
+
+
+def test_console_command_timeout_warns(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "jarvis")
+
+    def timeout(args, **kwargs):
+        raise doctor.subprocess.TimeoutExpired(args, kwargs["timeout"], stderr="launch stalled")
+
+    monkeypatch.setattr(doctor.subprocess, "run", timeout)
+    result = doctor.check_console_command()
+    assert result.status == "WARN"
+    assert "launch stalled" in result.detail
+    assert '$env:PYTHONPATH = "src"; python -m jarvis.interface.cli' in result.detail
+
+
+def test_console_command_execution_error_warns(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "jarvis")
+
+    def fail(args, **kwargs):
+        raise OSError("executable could not start")
+
+    monkeypatch.setattr(doctor.subprocess, "run", fail)
+    result = doctor.check_console_command()
+    assert result.status == "WARN"
+    assert "executable could not start" in result.detail
+    assert '$env:PYTHONPATH = "src"; python -m jarvis.interface.cli' in result.detail
 
 
 def test_workspace_exists_writable_and_missing(monkeypatch, tmp_path):

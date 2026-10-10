@@ -107,24 +107,50 @@ def check_console_command() -> Check:
     command = shutil.which("jarvis")
     if not command:
         return Check("jarvis command", "OK", "No installed jarvis command found; use the Python module command.")
-    try:
-        entry_points = importlib.metadata.entry_points()
-        if hasattr(entry_points, "select"):
-            scripts = entry_points.select(group="console_scripts", name="jarvis")
-        else:  # Python 3.10 compatibility
-            scripts = [ep for ep in entry_points.get("console_scripts", []) if ep.name == "jarvis"]
-        targets = [entry_point.value for entry_point in scripts]
-    except Exception as exc:
-        return Check("jarvis command", "WARN", f"Found {command}, but could not verify its entry point ({exc}).")
-    if "jarvis.interface.cli:main" in targets:
-        return Check("jarvis command", "OK", f"{command} targets jarvis.interface.cli:main.")
+
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
     fix = '$env:PYTHONPATH = "src"; python -m jarvis.interface.cli'
-    target_text = ", ".join(targets) if targets else "no jarvis console entry point was found"
-    return Check(
-        "jarvis command",
-        "WARN",
-        f"Found {command}, but it may be stale ({target_text}). Use: {fix}",
-    )
+    try:
+        result = subprocess.run(
+            [command, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as exc:
+        error_line = _first_error_line(exc.stderr) or _first_error_line(exc.stdout)
+        if not error_line:
+            error_line = "command timed out after 10 seconds"
+        return Check("jarvis command", "WARN", f"{error_line}. Use: {fix}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        error_line = _first_error_line(str(exc)) or exc.__class__.__name__
+        return Check("jarvis command", "WARN", f"Could not run installed command: {error_line}. Use: {fix}")
+
+    if result.returncode == 0:
+        return Check("jarvis command", "OK", f"{command} --help completed successfully.")
+    error_line = _first_error_line(result.stderr) or _first_error_line(result.stdout)
+    if not error_line:
+        error_line = f"command exited with status {result.returncode}"
+    return Check("jarvis command", "WARN", f"{error_line}. Use: {fix}")
+
+
+def _first_error_line(output: str | bytes | None) -> str:
+    if not output:
+        return ""
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if lines[0].startswith("Traceback "):
+        return lines[-1]
+    # Traceback headers and frame locations are less actionable than the exception.
+    for line in lines:
+        if not line.startswith(("Traceback ", "File \"")):
+            return line
+    return lines[-1]
 
 
 def _workspace_path() -> Path:
