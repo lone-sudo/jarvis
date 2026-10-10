@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from jarvis.core.checkpoint import CheckpointError, create_checkpoint
+from jarvis.core.plan_commit import commit_plan_paths
 from jarvis.core.plan import (
     ExecutionPlan,
     ExecutionStep,
@@ -99,7 +100,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "git_commit": ToolSpec(
         ActionTier.SAFE_WRITE, "SAFE_WRITE", None, ("message",), (),
-        lambda root, p, auto: GitInspector.commit_changes(root, p["message"], auto_confirm=auto),
+        # NOT GitInspector.commit_changes: that runs `git add -A` and would sweep unrelated
+        # untracked files into the commit, which a rollback would then delete (ADR-0005 h).
+        # `_paths` is injected by the engine (never accepted from a plan; see validate_plan).
+        lambda root, p, auto: commit_plan_paths(root, p["message"], p.get("_paths", []), auto),
     ),
 }
 
@@ -127,6 +131,11 @@ def validate_plan(plan: ExecutionPlan) -> None:
                 raise PlanFormatError(f"step {i} ({step.tool}): param '{key}' must be a string.")
         if step.tool == "git_commit" and not step.params["message"].strip():
             raise PlanFormatError(f"step {i} (git_commit): 'message' must not be empty.")
+        if step.tool == "git_commit" and not any(t.tool == "write_file" for t in plan.steps[: i - 1]):
+            raise PlanFormatError(
+                f"step {i} (git_commit): a plan's commit only includes files written by earlier "
+                f"write_file steps of the same plan, and none come before this step."
+            )
         if spec.path_param in step.params and not step.params[spec.path_param].strip() \
                 and step.tool != "list_directory":
             raise PlanFormatError(f"step {i} ({step.tool}): '{spec.path_param}' must not be empty.")
@@ -277,7 +286,7 @@ class ExecutionEngine:
 
             # 2. tool invocation
             try:
-                result = spec.invoke(project_root, step.params, self.auto_confirm)
+                result = spec.invoke(project_root, self._invoke_params(plan, i, step), self.auto_confirm)
                 result = result if isinstance(result, str) else str(result)
             except Exception as e:  # noqa: BLE001 - any tool crash must be preserved, not propagated
                 self._log_step(plan, i, step, "FAILURE", str(e))
@@ -362,6 +371,25 @@ class ExecutionEngine:
                     f"step {i + 1}: verifier '{spec['type']}' rejected its spec: {type(e).__name__}: {e}"
                 ) from e
         return verifiers
+
+    @staticmethod
+    def _invoke_params(plan: ExecutionPlan, i: int, step: ExecutionStep) -> dict:
+        """
+        What the tool actually receives. For git_commit the engine adds the exact files this
+        plan has written so far (successful earlier write_file steps), so the commit can never
+        include anything else. Always built here, never taken from the plan, and derived from
+        persisted step statuses so a resumed plan commits the same set.
+        """
+        params = dict(step.params)
+        if step.tool == "git_commit":
+            written: list[str] = []
+            for prior in plan.steps[:i]:
+                if prior.tool == "write_file" and prior.status is StepStatus.SUCCEEDED:
+                    path = prior.params.get("path")
+                    if isinstance(path, str) and path not in written:
+                        written.append(path)
+            params["_paths"] = written
+        return params
 
     # ---- per-step policy ------------------------------------------------
 

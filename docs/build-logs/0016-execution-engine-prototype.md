@@ -20,7 +20,7 @@
 
 ## Results
 - Baseline: **217 passed** before any change, on a fresh shallow clone of `main`.
-- After: **318 passed** (217 baseline + 101 new): plan model/store, checkpoint/rollback against real temporary git repos, the engine, and the CLI end to end.
+- After: **330 passed** (217 baseline + 113 new, after the commit-scope fix below): plan model/store, checkpoint/rollback against real temporary git repos, the engine, and the CLI end to end.
 - Mutation spot-check, run on a scratch copy: removing per-step authorization, ignoring the verifier verdict, marking failed steps `PENDING`, and dropping the rollback-point requirement each made tests fail (3, 5, 5, 2 failures). So the tests guard those behaviours rather than merely exercising them.
 - Existing tests needed **no changes**. `test_migrations.py` reads the latest migration number dynamically, so adding 005 did not disturb it.
 
@@ -28,6 +28,7 @@
 1. **A write could escape its project while staying inside the workspace.** My first test asserted `../other/escape.txt` would be denied. It wasn't: that path is inside the workspace, so workspace policy allows it. The consequence is more than a policy gap, because a checkpoint only covers the task's own repo, so such a write could never be rolled back. Mutating steps are now confined to the project (ADR-0005 b). Caught by a failing test, which is the process working.
 2. **`run_logged` mislabels successful reads.** It treats any result containing "denied by policy" as `REJECTED_BY_POLICY`. Our own ADRs contain that phrase, so a plan step reading them would be logged as a rejection. Not changed here; the engine logs its own exact status instead. Worth a separate fix.
 3. **The 120s default `timeout_seconds` includes human think time at `[y/N]` prompts.** Fine for read-only plans; likely too short for a write plan where you read diffs. Documented, and `--timeout` overrides it.
+4. **A plan's `git_commit` could cause data loss on rollback (found 2026-10-10, fixed).** Running a real write plan end to end in the sandbox showed the M001 commit tool (`git add -A`) committing every untracked file in the project, not just the file the plan wrote. A later `jarvis rollback` (`git reset --hard`) then deleted those files from disk, because the checkpoint commit did not contain them. My design note ("untracked files are safe, reset --hard leaves them alone") was true only until a commit made them tracked. The preview also showed them as a diffstat, not as deletions. Fixes: plan commits stage only plan-written files (`core/plan_commit.py`, ADR-0005 h); a commit step needs an earlier write step; the rollback preview lists files to be deleted. 12 regression tests added; 3 of them fail if the old behaviour is restored. All 330 tests pass in the sandbox. **Not yet re-run on the ZBook.**
 
 ## Verified on the real ZBook (Windows 11, Python 3.14, 2026-10-09)
 - `pytest tests/`: **316 passed, 2 skipped**. The 2 skips are the symlink tests (`test_engine_core.py`, `test_path_boundary.py`), which Windows skips without Developer Mode or admin rights; 316 + 2 = 318.

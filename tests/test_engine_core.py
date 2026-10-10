@@ -550,3 +550,106 @@ def test_load_default_verifiers_reads_VERIFIERS(monkeypatch):
 
 def test_registry_is_exactly_the_agreed_tools():
     assert sorted(TOOL_REGISTRY) == ["git_commit", "list_directory", "read_file", "write_file"]
+
+
+# ------------------------------------------- plan commit scope (ADR-0005 h)
+# Regression: a plan's git_commit used `git add -A`, swept unrelated untracked
+# files into the commit, and a later rollback then deleted them from disk.
+
+def commit_step(message="engine commit"):
+    return {"tool": "git_commit", "params": {"message": message}, "verify": {"type": "ok"}}
+
+
+def test_plan_commit_includes_only_files_the_plan_wrote(env):
+    (env.repo / "stray.txt").write_text("not part of the plan\n")      # untracked, pre-existing
+    (env.repo / "a.txt").write_text("v1\n")                              # tracked, unchanged
+    plan = make_plan(env, [write("c.txt", "committed\n"), commit_step()])
+
+    assert make_engine(env).run(plan.plan_id).status is PlanStatus.COMPLETED
+
+    assert git(env.repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["c.txt"]
+    assert git(env.repo, "ls-files", "--others", "--exclude-standard") == "stray.txt"
+    assert (env.repo / "stray.txt").read_text() == "not part of the plan\n"
+
+
+def test_rollback_after_plan_commit_keeps_strays_and_names_what_it_deletes(env):
+    from jarvis.core import checkpoint as cp
+
+    (env.repo / "stray.txt").write_text("keep me\n")
+    plan = make_plan(env, [write("c.txt", "committed\n"), commit_step()])
+    done = make_engine(env).run(plan.plan_id)
+
+    lines = []
+    cp.rollback(env.tracker, done.checkpoint_id, auto_confirm=True, out=lines.append)
+    text = "\n".join(lines)
+
+    assert (env.repo / "stray.txt").read_text() == "keep me\n"          # the bug: this used to be deleted
+    assert not (env.repo / "c.txt").exists()                             # plan-created, so undone
+    assert "DELETED from disk" in text and "c.txt" in text
+    deleted_block = text.split("DELETED from disk")[1].split("Changes to tracked")[0]
+    assert "c.txt" in deleted_block and "stray.txt" not in deleted_block
+    assert "Untracked files (NOT touched" in text and "stray.txt" in text.split("Untracked files (NOT touched")[1]
+
+
+def test_plan_commit_treats_glob_characters_literally(env):
+    (env.repo / "a1.txt").write_text("innocent\n")                       # would match 'a[1].txt' as a glob
+    plan = make_plan(env, [write("a[1].txt", "literal\n"), commit_step()])
+
+    assert make_engine(env).run(plan.plan_id).status is PlanStatus.COMPLETED
+    assert git(env.repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["a[1].txt"]
+    assert git(env.repo, "ls-files", "--others", "--exclude-standard") == "a1.txt"
+
+
+def test_plan_commit_with_other_files_already_staged_still_commits_only_plan_files(env):
+    # The engine's pre-flight refuses to start with staged changes, so this guards the
+    # commit function itself (defence in depth), called directly.
+    from jarvis.core.plan_commit import commit_plan_paths
+    (env.repo / "staged.txt").write_text("staged by someone\n")
+    git(env.repo, "add", "staged.txt")
+    (env.repo / "c.txt").write_text("plan file\n")
+
+    out = commit_plan_paths("proj", "only c", ["c.txt"], auto_confirm=True)
+
+    assert not out.startswith("ERROR"), out
+    assert git(env.repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["c.txt"]
+    assert "staged.txt" in git(env.repo, "diff", "--cached", "--name-only")
+
+
+def test_commit_step_needs_an_earlier_write_step(env):
+    with pytest.raises(PlanFormatError, match="written by earlier write_file"):
+        make_plan(env, [commit_step()])
+    with pytest.raises(PlanFormatError, match="written by earlier write_file"):
+        make_plan(env, [commit_step(), write("late.txt", "x\n")])
+
+
+def test_a_plan_cannot_supply_its_own_commit_paths(env):
+    step = {"tool": "git_commit", "params": {"message": "m", "_paths": ["a.txt"]}, "verify": {"type": "ok"}}
+    with pytest.raises(PlanFormatError, match="unexpected param"):
+        make_plan(env, [write("c.txt", "x\n"), step])
+
+
+def test_commit_only_includes_writes_that_succeeded_before_it(env):
+    from jarvis.core.engine import ExecutionEngine as E
+    plan = ExecutionPlan.from_dict({"task_id": env.task, "steps": [
+        write("one.txt", "1\n"), write("two.txt", "2\n"), write("one.txt", "again\n"), commit_step(),
+    ]}, require_state=False)
+    plan.steps[0].status = StepStatus.SUCCEEDED
+    plan.steps[2].status = StepStatus.SUCCEEDED         # two.txt never succeeded; one.txt listed twice
+    assert E._invoke_params(plan, 3, plan.steps[3])["_paths"] == ["one.txt"]
+    assert "_paths" not in E._invoke_params(plan, 0, plan.steps[0])
+
+
+@pytest.mark.parametrize("paths", [[], ["../x.txt"], ["/etc/passwd"], ["a/../../x"]])
+def test_commit_plan_paths_refuses_empty_and_unsafe_paths(env, paths):
+    from jarvis.core.plan_commit import commit_plan_paths
+    assert commit_plan_paths("proj", "m", paths, auto_confirm=True).startswith("ERROR")
+
+
+def test_declined_plan_commit_changes_nothing(env):
+    from jarvis.core.plan_commit import commit_plan_paths
+    (env.repo / "c.txt").write_text("x\n")
+    before = git(env.repo, "rev-parse", "HEAD")
+    out = commit_plan_paths("proj", "m", ["c.txt"], auto_confirm=False)
+    assert "declined by user" in out
+    assert git(env.repo, "rev-parse", "HEAD") == before
+    assert git(env.repo, "diff", "--cached", "--name-only") == ""

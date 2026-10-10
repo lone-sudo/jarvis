@@ -14,6 +14,12 @@ faithful "undo this plan" if nothing else was uncommitted when the plan
 started. So create_checkpoint() refuses a tree with uncommitted changes
 to tracked files. Untracked files don't count: reset --hard leaves them
 alone, and rollback lists them rather than touching them.
+
+The flip side: a file that becomes TRACKED after the checkpoint (added by a
+commit) is deleted from disk by reset --hard, because the checkpoint commit
+did not contain it. A plan's git_commit therefore commits only files that
+plan wrote (core/plan_commit.py), and the rollback preview names every file
+it will delete, so nothing disappears without being listed.
 """
 
 import uuid
@@ -135,6 +141,8 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
     dropped = _git(target, "log", "--oneline", f"{commit}..HEAD")
     changes = _git(target, "diff", "--stat", commit)
     untracked = _git(target, "ls-files", "--others", "--exclude-standard")
+    # Tracked now, absent from the checkpoint commit: reset --hard will delete these from disk.
+    deleted = _git(target, "diff", "--name-only", "--diff-filter=A", commit)
 
     if not dropped and not changes:
         return f"Nothing to roll back: {project_root} already matches checkpoint {checkpoint_id}."
@@ -143,8 +151,11 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
     if dropped:
         out("Commits that will be removed from the branch (still recoverable via git reflog):")
         out(dropped)
+    if deleted:
+        out("Files that will be DELETED from disk (they did not exist at the checkpoint):")
+        out(deleted)
     if changes:
-        out("Changes to tracked files that will be DISCARDED:")
+        out("Changes to tracked files that will be DISCARDED (summary):")
         out(changes)
     if untracked:
         out("Untracked files (NOT touched, listed for your information):")
