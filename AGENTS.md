@@ -1,7 +1,7 @@
 # AGENTS.md: shared rules for every AI working on Jarvis
 
 Read this first. It is the single source of truth for Claude, Codex, Antigravity, Gemini and ChatGPT.
-`CLAUDE.md` only points here. If a chat message disagrees with this file, stop and ask Lone.
+`CLAUDE.md` only points here. Codex: also read `docs/onboarding/CODEX.md`. If a chat message disagrees with this file, stop and ask Lone.
 Do not paste long context into a session to "bring you up to speed": read this file, the ADR for the
 subsystem you touch, and the code. Past decisions live in `docs/adrs/`. Do not re-derive them.
 
