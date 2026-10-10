@@ -20,6 +20,7 @@ from jarvis.core.plan import ExecutionPlan, PlanFormatError
 from jarvis.core.engine import EngineError, ExecutionEngine, validate_plan
 from jarvis.core.checkpoint import CheckpointError, rollback as rollback_to_checkpoint
 from jarvis.state.plan_store import PlanNotFound, PlanStore
+from jarvis.interface import doctor
 
 
 def cmd_init_project(args):
@@ -718,9 +719,20 @@ def cmd_rollback(args):
         print(f"ERROR: {e}")
 
 
+def cmd_doctor(args):
+    checks = doctor.run_checks()
+    for check in checks:
+        print(f"{check.status}: {check.name} — {check.detail}")
+    if any(check.status == "FAIL" for check in checks):
+        raise SystemExit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="jarvis", description="Jarvis Personal AI Operating Layer")
     subparsers = parser.add_subparsers(dest="command")
+
+    p_doctor = subparsers.add_parser("doctor", help="Diagnose the Jarvis setup without changing files")
+    p_doctor.set_defaults(func=cmd_doctor)
 
     p_init = subparsers.add_parser("init-project", help="Register a project under the workspace root")
     p_init.add_argument("key", help="Short project key, e.g. structural-rcc-suite")

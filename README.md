@@ -1,5 +1,19 @@
 # Jarvis — Personal AI Operating Layer
 
+## Windows setup
+
+From the repository folder in PowerShell, run the setup checks:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m jarvis.interface.cli doctor
+```
+
+`doctor` reports `OK`, `WARN`, or `FAIL` for Python, pip, Git, the Jarvis import and installed
+command, the configured workspace, and the database path. It is read-only. A stale installed
+`jarvis` command is a warning; use `$env:PYTHONPATH = "src"` and
+`python -m jarvis.interface.cli` to run the current checkout without relying on that command.
+
 See [`docs/JOURNEY.md`](docs/JOURNEY.md) for the full story of how this was built — the real
 engineering case study, including the mistakes. `docs/adrs/` holds frozen architecture decisions;
 `docs/build-logs/` holds the detailed, per-milestone record `JOURNEY.md` is narrated from.
