@@ -1,7 +1,6 @@
 # ADR-0005: Execution Engine — Per-Step Authorization, Targeted Verification, Evidence-Preserving Failure
 
-**Status:** Proposed. Read-only path verified on the real ZBook (2026-10-09); write path, checkpoints and rollback still sandbox-tested only, pending `core/verifier.py`. Not accepted until Lone has verified those on the real ZBook (invariant 5: sandbox-verified ≠ real-machine-verified).
-(invariant 5: sandbox-verified ≠ real-machine-verified).
+**Status:** Proposed. Verified on the real ZBook (Windows 11): the read-only path (2026-10-09) and, on the merged engine plus verifier branch, write plans with verification, verification failure, plan commit scope, rollback, and project confinement (2026-10-10). Decision (h) awaits Lone's confirmation. The `pytest_target` verifier has been unit-tested but not yet exercised inside a real plan on the ZBook. Acceptance is Lone's call (invariant 5: sandbox-verified ≠ real-machine-verified).
 **Date:** 2026-10-09
 
 ## Context

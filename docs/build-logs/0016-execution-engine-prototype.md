@@ -3,7 +3,7 @@
 **Date:** 2026-10-09
 **Contributors:** Claude (Stream A: plan model, store, engine, checkpoint/rollback, CLI). Antigravity owns Stream B (`verifier.py`, integration and mutation harness) and was not involved in this log.
 **Branch:** `feature/claude-m002-engine` (cut from `main` at `6b3a6a9`)
-**Status:** Read-only path verified on the real ZBook (2026-10-09). Write plans, checkpoints and rollback are sandbox-verified only.
+**Status:** Verified on the real ZBook: read-only path (2026-10-09); write plans, verification failure, plan commit scope, rollback and project confinement on the merged engine + verifier branch (2026-10-10). See "Not done / not verified" for what remains.
 
 ## What was built
 | File | Role |
@@ -28,7 +28,7 @@
 1. **A write could escape its project while staying inside the workspace.** My first test asserted `../other/escape.txt` would be denied. It wasn't: that path is inside the workspace, so workspace policy allows it. The consequence is more than a policy gap, because a checkpoint only covers the task's own repo, so such a write could never be rolled back. Mutating steps are now confined to the project (ADR-0005 b). Caught by a failing test, which is the process working.
 2. **`run_logged` mislabels successful reads.** It treats any result containing "denied by policy" as `REJECTED_BY_POLICY`. Our own ADRs contain that phrase, so a plan step reading them would be logged as a rejection. Not changed here; the engine logs its own exact status instead. Worth a separate fix.
 3. **The 120s default `timeout_seconds` includes human think time at `[y/N]` prompts.** Fine for read-only plans; likely too short for a write plan where you read diffs. Documented, and `--timeout` overrides it.
-4. **A plan's `git_commit` could cause data loss on rollback (found 2026-10-10, fixed).** Running a real write plan end to end in the sandbox showed the M001 commit tool (`git add -A`) committing every untracked file in the project, not just the file the plan wrote. A later `jarvis rollback` (`git reset --hard`) then deleted those files from disk, because the checkpoint commit did not contain them. My design note ("untracked files are safe, reset --hard leaves them alone") was true only until a commit made them tracked. The preview also showed them as a diffstat, not as deletions. Fixes: plan commits stage only plan-written files (`core/plan_commit.py`, ADR-0005 h); a commit step needs an earlier write step; the rollback preview lists files to be deleted. 12 regression tests added; 3 of them fail if the old behaviour is restored. All 330 tests pass in the sandbox. **Not yet re-run on the ZBook.**
+4. **A plan's `git_commit` could cause data loss on rollback (found 2026-10-10, fixed).** Running a real write plan end to end in the sandbox showed the M001 commit tool (`git add -A`) committing every untracked file in the project, not just the file the plan wrote. A later `jarvis rollback` (`git reset --hard`) then deleted those files from disk, because the checkpoint commit did not contain them. My design note ("untracked files are safe, reset --hard leaves them alone") was true only until a commit made them tracked. The preview also showed them as a diffstat, not as deletions. Fixes: plan commits stage only plan-written files (`core/plan_commit.py`, ADR-0005 h); a commit step needs an earlier write step; the rollback preview lists files to be deleted. 12 regression tests added; 3 of them fail if the old behaviour is restored. All 330 tests pass in the sandbox. Re-verified on the ZBook on 2026-10-10 (Test C below).
 
 ## Verified on the real ZBook (Windows 11, Python 3.14, 2026-10-09)
 - `pytest tests/`: **316 passed, 2 skipped**. The 2 skips are the symlink tests (`test_engine_core.py`, `test_path_boundary.py`), which Windows skips without Developer Mode or admin rights; 316 + 2 = 318.
@@ -36,9 +36,17 @@
 - Path-escape plan (`read_file ../../Windows/win.ini`): refused before any read, plan `BLOCKED` with reason `POLICY`, evidence saved, nothing rolled back or deleted. Note the path resolved to `C:\Users\USER\Windows\win.ini` (inside the user's profile, not the real `C:\Windows`); the check blocks on "resolved path outside the workspace root", so this still exercises the rule.
 - Setup note: the `jarvis` console command on that machine was a stale install (`jarvis.cli`), and Python 3.14 there has no pip. Run via `$env:PYTHONPATH = "src"; python -m jarvis.interface.cli ...` instead.
 
+## Verified on the real ZBook, write path (2026-10-10, merged engine + verifier branch, `fd47fca`)
+- `pytest tests/`: **354 passed, 2 skipped** (356 total; the 2 skips are the same Windows symlink tests). This includes the 12 plan-commit regression tests.
+- **Test A, write and verify:** diff shown, `[y/N]` accepted, `verified (file_content)`, plan `COMPLETED`, checkpoint recorded.
+- **Test B, verification fails on purpose:** plan `BLOCKED` (`VERIFICATION`), verifier evidence shown, "Nothing was rolled back or deleted", the written file left on disk.
+- **Test C, edit + commit + rollback, with an unrelated untracked file present:** the commit preview listed only `README.md` as "WILL be committed" and the other files under "NOT part of this commit"; the commit contained only `README.md`; after `rollback`, `README.md` was back to its original text and the unrelated untracked file still existed. This is the scenario that previously lost files.
+- **Test D, write outside the project:** `BLOCKED` (`POLICY`) before any write prompt; the target file was not created.
+
 ## Not done / not verified
-- **Not yet run on Windows 11:** write plans, git checkpoints and `jarvis rollback` (blocked on `core/verifier.py`, below). Path handling for those goes through `resolve_safe_path` and `Path(...).as_posix()`, but that is reasoning, not evidence.
-- `core/verifier.py` does not exist on this branch. Until Stream B merges, write plans stop in pre-flight with a clear message ("no verifier is installed for type ..."), and only read-only plans run end to end. The engine picks up `VERIFIERS` from that module automatically once present; the contract is in ADR-0005.
+- Not run manually on the ZBook: the rollback preview's "Files that will be DELETED from disk" section (Test C edited an already-tracked file, so it had nothing to list). It is covered by an automated test only.
+- Not run inside a real plan on the ZBook: the `pytest_target` verifier (unit-tested by Stream B, see build log 0017).
+- `core/verifier.py` (Stream B, Antigravity) is now merged into this branch; the engine picks up `VERIFIERS` from it automatically. Its own record is build log 0017.
 - No concurrency guard between two simultaneous `plan-run` processes.
 - No `task-done` command: a completed plan leaves its task `IN_PROGRESS` (ADR-0005 e).
 - Pushed to `origin/feature/claude-m002-engine` once GitHub write access was granted to the Claude app. `main` is untouched; Lone holds merge authority.
