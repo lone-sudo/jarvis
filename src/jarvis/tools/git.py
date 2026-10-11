@@ -14,8 +14,13 @@ class GitInspector:
     @staticmethod
     def _run(args: list[str], cwd: Path) -> str:
         try:
+            # git writes UTF-8. `text=True` alone decodes with the machine's locale codec (cp1252
+            # on Windows), which mangles non-ASCII file names and CRASHES (UnicodeDecodeError in
+            # the reader thread, then result.stdout is None) on bytes such as 0x9d, found in a
+            # curly quote. Decode as UTF-8 and never raise on a bad byte.
             result = subprocess.run(
-                ["git", *args], cwd=cwd, capture_output=True, text=True, check=True, timeout=15
+                ["git", *args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace",
+                check=True, timeout=15,
             )
             return result.stdout.strip()
         except FileNotFoundError:

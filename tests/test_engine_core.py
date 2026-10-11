@@ -917,7 +917,7 @@ def test_cli_output_survives_characters_the_console_codec_cannot_encode(monkeypa
     from jarvis.interface import cli
 
     raw = io.BytesIO()
-    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    stream = io.TextIOWrapper(raw, encoding="cp1252", newline="\n")    # no \r\n translation, so this holds on Windows too
     monkeypatch.setattr(sys, "stdout", stream)
     cli._make_output_safe()
 
@@ -925,3 +925,34 @@ def test_cli_output_survives_characters_the_console_codec_cannot_encode(monkeypa
     stream.flush()
 
     assert raw.getvalue().endswith(b"plain: ok\n")
+
+
+def test_git_output_is_decoded_as_utf8_not_the_machine_locale(env, monkeypatch):
+    # Found on the ZBook (Windows, cp1252): text=True mangled non-ASCII names and crashed on byte 0x9d.
+    from jarvis.tools import git as git_mod
+
+    seen = {}
+    real_run = git_mod.subprocess.run
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(git_mod.subprocess, "run", spy)
+    git_mod.GitInspector._run(["status", "--short"], env.repo)
+
+    assert seen.get("encoding") == "utf-8" and seen.get("errors") == "replace"
+
+
+def test_git_output_with_bytes_a_legacy_codec_cannot_decode_does_not_crash(env):
+    # A curly quote in a file name contains byte 0x9d, undefined in cp1252: this used to raise.
+    (env.repo / "quote_\u201d.txt").write_text("stray\n")
+
+    out = git_mod_run(env.repo, ["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+
+    assert "quote_\u201d.txt" in out
+
+
+def git_mod_run(repo, args):
+    from jarvis.tools.git import GitInspector
+    return GitInspector._run(args, repo)
