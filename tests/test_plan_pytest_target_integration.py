@@ -55,11 +55,18 @@ def _pid_is_alive(pid: int) -> bool:
     else:
         try:
             os.kill(pid, 0)
-            return True
         except ProcessLookupError:
             return False
         except PermissionError:
-            return True
+            pass
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            state = stat.rsplit(")", 1)[1].split()[0]
+            if state == "Z":
+                return False
+        except (OSError, IndexError):
+            pass
+        return True
 
 
 @pytest.fixture

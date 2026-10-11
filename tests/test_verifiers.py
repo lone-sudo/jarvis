@@ -343,11 +343,18 @@ def test_pytest_target_verifier_timeout_kills_spawned_child_tree(test_env):
         else:
             try:
                 os.kill(pid, 0)
-                return True
             except ProcessLookupError:
                 return False
             except PermissionError:
-                return True
+                pass
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+                state = stat.rsplit(")", 1)[1].split()[0]
+                if state == "Z":
+                    return False
+            except (OSError, IndexError):
+                pass
+            return True
 
     proj = test_env["proj"]
     tests_dir = proj / "tests"
