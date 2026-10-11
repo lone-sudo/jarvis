@@ -140,7 +140,9 @@ def commit_plan_paths(
     # -z: NUL-separated, never-quoted paths (see _parse_status_v2). -uall lists untracked files
     # one by one instead of collapsing a new directory to "dir/" (which made a file this plan
     # wrote appear under "NOT part of this commit").
-    status_args = ["status", "--porcelain=v2", "-z", "--untracked-files=all"]
+    # --no-renames: a pathspec commit of only a renamed file's new name leaves the staged deletion
+    # of its old name behind, so the old name must be listed on its own (Task 005, F5).
+    status_args = ["status", "--porcelain=v2", "-z", "--no-renames", "--untracked-files=all"]
     status = GitInspector._run([*status_args, "--", *specs], target)
     if status.startswith("ERROR"):
         return status
