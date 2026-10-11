@@ -17,7 +17,9 @@ continuity and tool execution. AI models are replaceable reasoning backends, nev
 3. **Confirmed mutations.** `write-file` and `git-commit` show a diff and need an interactive `[y/N]`.
    Any new command that writes a file must call `FileSystemInspector.write_file`. It must never write
    with `Path.write_text`, `open(..., "w")` or similar, even for an export or a log, and even when the
-   path has already passed `resolve_safe_path()`.
+   path has already passed `resolve_safe_path()`. The only exceptions are Jarvis's own Dual Storage
+   backends (invariant 4): `state/database.py` (SQLite), `memory/markdown.py` (`JARVIS_NOTES.md`) and
+   `memory/inbox_markdown.py` (`inbox/<id>.md`). Any other file write needs `write_file`.
 4. **Dual storage (ADR-0001).** SQLite for machine state; Markdown for human-readable project memory.
 5. **Real-machine verification.** Sandbox-verified is not real-machine-verified. Nothing is "done"
    until Lone has run it on his HP ZBook (Windows 11). Say which of the two you did.
