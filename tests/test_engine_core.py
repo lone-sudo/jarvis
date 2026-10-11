@@ -1108,3 +1108,27 @@ def test_git_failure_while_rechecking_is_logged_and_says_nothing_was_changed(env
 
     assert (env.repo / "a.txt").read_text() == "v2\n"
     assert ("git_rollback", "FAILURE") in rows(env)
+
+
+def test_snapshot_does_not_change_when_only_the_index_stat_cache_is_refreshed(env):
+    # Found on the ZBook (Windows, autocrlf=true): test_rollback_after_plan_commit... was refused
+    # as "repository changed" with nothing changed. My F3 fix ran `diff` with autocrlf=false, and
+    # for a CRLF file git then trusts the index blob while the entry is stat-clean but reads the
+    # working tree while it is racy. An ordinary `git status` between two snapshots flips that.
+    import os
+    from jarvis.core import checkpoint as cp
+
+    git(env.repo, "config", "core.autocrlf", "true")
+    base = git(env.repo, "rev-parse", "HEAD")
+    (env.repo / "c.txt").write_bytes(b"committed\r\n")
+    git(env.repo, "add", "c.txt")
+    git(env.repo, "commit", "-m", "plan commit")
+
+    # Make c.txt's index entry "racy": file mtime in the past, index mtime equal to it.
+    past = os.stat(env.repo / "c.txt").st_mtime_ns - 5_000_000_000
+    os.utime(env.repo / "c.txt", ns=(past, past))
+    os.utime(env.repo / ".git" / "index", ns=(past, past))
+
+    first = cp._rollback_snapshot(env.repo, base)
+    git(env.repo, "status")                                 # refreshes the stat cache, rewrites the index
+    assert cp._rollback_snapshot(env.repo, base) == first
