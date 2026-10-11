@@ -51,6 +51,7 @@ class FileSystemInspector:
         target = SecurityPolicy.get_workspace_root() / relative_path
         try:
             PolicyValidator.authorize_tool("write_file", ActionTier.SAFE_WRITE, target)
+            authorized_path = SecurityPolicy.resolve_safe_path(target)
         except PolicyViolation as e:
             return f"ERROR: Access denied by policy. {e}"
 
@@ -70,6 +71,14 @@ class FileSystemInspector:
         confirmed = auto_confirm if auto_confirm is not None else _confirm(f"Write these changes to {relative_path}?")
         if not confirmed:
             return "ERROR: Access denied by policy. (declined by user)"
+
+        try:
+            PolicyValidator.authorize_tool("write_file", ActionTier.SAFE_WRITE, target)
+            confirmed_path = SecurityPolicy.resolve_safe_path(target)
+        except PolicyViolation:
+            return "ERROR: Access denied by policy. Path changed while waiting for confirmation."
+        if confirmed_path != authorized_path:
+            return "ERROR: Access denied by policy. Path changed while waiting for confirmation."
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(new_content, encoding="utf-8")
