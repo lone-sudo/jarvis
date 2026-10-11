@@ -956,3 +956,87 @@ def test_git_output_with_bytes_a_legacy_codec_cannot_decode_does_not_crash(env):
 def git_mod_run(repo, args):
     from jarvis.tools.git import GitInspector
     return GitInspector._run(args, repo)
+
+
+# ----------------------- Antigravity's Task 005 review of 231e55b / 7f52fc1 (F1, F2, F3, F5)
+
+def _blocked_plan_with_edit_of_a(env):
+    plan = make_plan(env, [write("a.txt", "v2\n", verify={"type": "fail"})])
+    blocked = make_engine(env).run(plan.plan_id)
+    assert blocked.status is PlanStatus.BLOCKED
+    return plan, blocked
+
+
+def test_rollback_refuses_an_edit_that_keeps_the_diffstat_identical(env, monkeypatch):
+    # F1: `git diff --stat` only counts lines, so rewriting a changed line to different text of
+    # the same line count looked unchanged and reset --hard destroyed the edit.
+    from jarvis.core import checkpoint as cp
+
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+
+    def edit_same_line_count(_prompt):
+        (env.repo / "a.txt").write_text("PRECIOUS EDIT made during the prompt\n")
+        return True
+
+    monkeypatch.setattr(cp, "_confirm", edit_same_line_count)
+    with pytest.raises(cp.CheckpointError, match="changed while you were deciding"):
+        cp.rollback(env.tracker, blocked.checkpoint_id, out=lambda *_: None)
+
+    assert (env.repo / "a.txt").read_text() == "PRECIOUS EDIT made during the prompt\n"
+    assert env.store.load(plan.plan_id).status is PlanStatus.BLOCKED
+
+
+def test_rollback_refuses_if_a_branch_was_created_and_checked_out_while_the_prompt_was_open(env, monkeypatch):
+    # F2: same commit, different branch. HEAD is unchanged, so reset --hard would have moved the
+    # NEW branch and left the one the user was told about untouched.
+    from jarvis.core import checkpoint as cp
+
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+    before = git(env.repo, "rev-parse", "HEAD")
+
+    def switch_branch(_prompt):
+        git(env.repo, "checkout", "-q", "-b", "save-work")
+        return True
+
+    monkeypatch.setattr(cp, "_confirm", switch_branch)
+    with pytest.raises(cp.CheckpointError, match="changed while you were deciding"):
+        cp.rollback(env.tracker, blocked.checkpoint_id, out=lambda *_: None)
+
+    assert git(env.repo, "rev-parse", "HEAD") == before
+    assert (env.repo / "a.txt").read_text() == "v2\n"
+
+
+def test_state_only_rollback_also_rechecks_after_the_prompt(env, monkeypatch):
+    # F3: the branch that only resets plan state skipped the re-check entirely.
+    from jarvis.core import checkpoint as cp
+
+    plan = make_plan(env, [write("n.txt", "x\n", verify={"type": "fail"})])
+    blocked = make_engine(env).run(plan.plan_id)
+
+    def edit_a_tracked_file(_prompt):
+        (env.repo / "a.txt").write_text("edited during the prompt\n")
+        return True
+
+    monkeypatch.setattr(cp, "_confirm", edit_a_tracked_file)
+    with pytest.raises(cp.CheckpointError, match="changed while you were deciding"):
+        cp.rollback(env.tracker, blocked.checkpoint_id, out=lambda *_: None)
+
+    assert env.store.load(plan.plan_id).status is PlanStatus.BLOCKED
+
+
+def test_snapshot_is_stable_when_nothing_changes(env):
+    # Guard against the fix being too sensitive: two snapshots of an untouched repo must match.
+    from jarvis.core import checkpoint as cp
+
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+    commit = cp.get_checkpoint(env.tracker.db_path, blocked.checkpoint_id)["git_commit_hash"]
+    assert cp._rollback_snapshot(env.repo, commit) == cp._rollback_snapshot(env.repo, commit)
+
+
+def test_staged_rename_leaves_its_old_path_visible_in_the_excluded_list(env, capsys):
+    # F5: with rename detection, `R b.txt <- a.txt` hid a.txt, but a pathspec commit of b.txt
+    # alone leaves the staged deletion of a.txt behind. The preview must name it.
+    git(env.repo, "mv", "a.txt", "b.txt")
+    out, will, other = _commit_preview(capsys, env, ["b.txt"])
+    assert "b.txt" in will
+    assert "a.txt" in other
