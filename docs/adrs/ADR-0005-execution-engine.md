@@ -1,6 +1,6 @@
 # ADR-0005: Execution Engine — Per-Step Authorization, Targeted Verification, Evidence-Preserving Failure
 
-**Status:** Proposed. Verified on the real ZBook (Windows 11): the read-only path (2026-10-09) and, on the merged engine plus verifier branch, write plans with verification, verification failure, plan commit scope, rollback, and project confinement (2026-10-10). Decision (h) awaits Lone's confirmation. The `pytest_target` verifier has been unit-tested but not yet exercised inside a real plan on the ZBook. Acceptance is Lone's call (invariant 5: sandbox-verified ≠ real-machine-verified).
+**Status:** Proposed. Verified on the real ZBook (Windows 11): the read-only path (2026-10-09) and, on the merged engine plus verifier branch, write plans with verification, verification failure, plan commit scope, rollback, and project confinement (2026-10-10). Decision (h) was confirmed by Lone on 2026-10-11. The `pytest_target` verifier has been unit-tested but not yet exercised inside a real plan on the ZBook. Acceptance is Lone's call (invariant 5: sandbox-verified ≠ real-machine-verified).
 **Date:** 2026-10-09
 
 ## Context
@@ -30,7 +30,7 @@ decides what actually runs.
    current_step_index, max_steps, plan_json, created_at, updated_at`. `plan_json` is canonical; the
    other columns are same-statement copies for filtering. `timeout_seconds` and `checkpoint_id` live in the JSON.
 
-## Implementation decisions made while building — **confirmed by Lone 2026-10-09 (a–g as written)**
+## Implementation decisions made while building — **confirmed by Lone (a–g as written on 2026-10-09; h on 2026-10-11)**
 Decision (e) is accepted as is: the engine never marks a task `DONE`. A command to close a task is deferred, not rejected; revisit when a real workflow needs it.
 These go beyond the six above. Each is a deliberate choice with a reason, not an accident.
 
@@ -43,7 +43,7 @@ These go beyond the six above. Each is a deliberate choice with a reason, not an
 | e | **The engine never marks a task `DONE`.** A completed plan leaves the task `IN_PROGRESS`. | `DONE` is terminal and a task may have several plans. | There is currently no CLI command to close a task. Needs a decision. |
 | f | **Re-running a `BLOCKED` (or interrupted `RUNNING`) plan resumes at the failed step.** The original checkpoint is kept. Rolling back resets any plan that used that checkpoint to `PENDING` step 0. | Otherwise a plan could resume past work a rollback had erased. | — |
 | g | **Plan tools are exactly `read_file`, `list_directory`, `write_file`, `git_commit`.** Anything else is denied by default. No network steps. | Keeps M002 inside the non-goals and the $0 policy. | — |
-| h | **A plan's `git_commit` commits only the files that plan wrote**: the `write_file` steps that succeeded before it, via `core/plan_commit.py` (literal pathspecs, never `git add -A`). A commit step with no earlier write step is rejected when the plan is created. The rollback preview now lists every file it will **delete from disk**. | The M001 `commit_changes` tool runs `git add -A`. In a plan that swept unrelated untracked files into the commit, and a later `rollback` then deleted them, because the checkpoint commit did not contain them. Found by running a real write plan end to end, not by reading the code. *(Added 2026-10-10, pending Lone's confirmation.)* | A plan cannot commit a file it did not write (for example one you created by hand). Commit those with `jarvis git-commit`. |
+| h | **A plan's `git_commit` commits only the files that plan wrote**: the `write_file` steps that succeeded since the previous commit (or the start of the plan), via `core/plan_commit.py` (literal pathspecs, never `git add -A`). A commit step with no write step since the previous commit is rejected when the plan is created. The rollback preview now lists every file it will **delete from disk**. | The M001 `commit_changes` tool runs `git add -A`. In a plan that swept unrelated untracked files into the commit, and a later `rollback` then deleted them, because the checkpoint commit did not contain them. Found by running a real write plan end to end, not by reading the code. *(Added 2026-10-10; confirmed by Lone 2026-10-11. Scope tightened after Antigravity's review of 0a2b4bc, see build log 0016.)* | A plan cannot commit a file it did not write (for example one you created by hand). Commit those with `jarvis git-commit`. |
 
 ## Verifier interface (contract for `src/jarvis/core/verifier.py`, Antigravity's stream)
 The three types below already exist in `core/plan.py`. Import them; do not redefine.
