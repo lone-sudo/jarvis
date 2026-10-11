@@ -296,6 +296,92 @@ def test_pytest_target_verifier_absolute_path_arg_refused(tmp_path):
         PytestTargetVerifier({"type": "pytest_target", "args": ["-k", abs_arg]})
 
 
+def test_pytest_target_verifier_env_allowlist_strips_parent_secrets(test_env, monkeypatch):
+    proj = test_env["proj"]
+    ctx = test_env["ctx"]
+    secret_val = "SUPER_SECRET_KEY_VALUE_98765"
+    monkeypatch.setenv("FAKE_API_KEY", secret_val)
+    monkeypatch.setenv("GEMINI_API_KEY", secret_val)
+    monkeypatch.setenv("JARVIS_TELEGRAM_BOT_TOKEN", secret_val)
+
+    tests_dir = proj / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_env_check.py").write_text(
+        "import os\n"
+        "def test_env_isolation():\n"
+        "    print('FAKE_API_KEY=' + str(os.environ.get('FAKE_API_KEY')))\n"
+        "    assert os.environ.get('FAKE_API_KEY') is None\n"
+        "    assert os.environ.get('GEMINI_API_KEY') is None\n"
+        "    assert os.environ.get('JARVIS_TELEGRAM_BOT_TOKEN') is None\n"
+        "    assert os.environ.get('PATH'), 'PATH must remain present'\n"
+        "    assert os.environ.get('PYTHONDONTWRITEBYTECODE') == '1'\n",
+        encoding="utf-8",
+    )
+
+    v = PytestTargetVerifier({"type": "pytest_target", "target": "tests/test_env_check.py", "args": ["-s"]})
+    res = v.verify(ExecutionStep(tool="write_file"), ctx)
+    assert res.ok is True, res.detail
+    assert secret_val not in res.detail
+
+
+def test_pytest_target_verifier_timeout_kills_spawned_child_tree(test_env):
+    import ctypes
+    import os
+    import re
+
+    def _pid_alive(pid: int) -> bool:
+        if os.name == "nt":
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                return bool(ok and code.value == 259)
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        else:
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+
+    proj = test_env["proj"]
+    tests_dir = proj / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_tree_hang.py").write_text(
+        "import os, subprocess, sys, time\n"
+        "def test_spawn_and_hang():\n"
+        "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "    print(f'PYTEST_PID={os.getpid()} CHILD_PID={child.pid}', flush=True)\n"
+        "    time.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    v = PytestTargetVerifier({
+        "type": "pytest_target",
+        "target": "tests/test_tree_hang.py",
+        "args": ["-s"],
+        "timeout": 1.5,
+    })
+    ctx = VerificationContext(project_root=proj, workspace_root=test_env["ws"], time_remaining=30.0)
+    res = v.verify(ExecutionStep(tool="write_file"), ctx)
+    assert res.ok is False
+    assert "pytest timed out after 1.5s" in res.detail
+
+    m_pytest = re.search(r"PYTEST_PID=(\d+)", res.detail)
+    m_child = re.search(r"CHILD_PID=(\d+)", res.detail)
+    assert m_pytest and m_child, f"Expected both PIDs in detail, got:\n{res.detail}"
+    pytest_pid = int(m_pytest.group(1))
+    child_pid = int(m_child.group(1))
+    assert not _pid_alive(pytest_pid), f"pytest process {pytest_pid} still alive after timeout"
+    assert not _pid_alive(child_pid), f"spawned child process {child_pid} still alive after timeout"
+
+
+
 # ==============================================================================
 # 3. GitCommitVerifier Tests
 # ==============================================================================
