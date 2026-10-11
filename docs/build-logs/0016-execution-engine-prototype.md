@@ -66,6 +66,17 @@ All four open findings reproduced in the sandbox with a failing test first; fixe
 | F5: a staged rename hid the old path from "NOT part of this commit" | Low | `--no-renames` in `commit_plan_paths` |
 F4 (the non-ASCII test needing the UTF-8 decode) was already fixed in `938aa3d`. 5 new tests: 4 fail on the old code, 1 guards against the snapshot being too sensitive. Mistake worth recording: my first re-check (`231e55b`) was tested only with an edit that changed the line counts, so it passed its own test. The new test uses an edit with identical counts.
 
+## Antigravity's review of 489939e (2026-10-11): four more findings, all reproduced, fixed
+`489939e` and the Gemini/Task 005 fixes were merged to `main` and passed on the ZBook (417 passed, 8 skipped) before this review came back. Each finding below failed a new test on the code as merged.
+| Finding | Rating | Fix |
+|---|---|---|
+| F1: an edit staged and then reverted on disk left the working tree equal to the checkpoint, so rollback said "nothing to roll back" and left the staged edit | Medium (no data lost; the plan is reset and a re-run is refused until the index is cleaned) | the summary now includes `diff --cached --stat`, so a staged difference counts as something to reset |
+| F2: the commit preview showed no diff for a plan file that was already staged (`git diff` is working tree vs index) | Medium: a gap in the consent surface | diff against `HEAD`, which is what `git commit -- <paths>` records |
+| F3: with `core.autocrlf=true`, a line-ending-only edit during the prompt left the digest unchanged | Low | digest computed with `-c core.autocrlf=false` |
+| F4: a git error or timeout during the re-check escaped as a bare error with no audit row | Low | caught, logged as FAILURE, and reported as "Nothing was changed" |
+Also from that report: the 8 ZBook skips are 4 symlink tests (Windows needs Developer Mode), 1 quoting test (illegal Windows file names) and 3 of Codex's hardening tests that use POSIX marker scripts. So Task 004's git-config protections have had no real Windows run. A follow-up task for Codex covers that. `AGENTS.md` invariant 3 now lists the only permitted exceptions to "writes go through `write_file`".
+Lesson: a test that proves the new code works is not a test of what the old code missed. F1 here is the same family as the earlier `--stat` bug: each fix tested the case reported, not the neighbouring ones (index vs working tree, line endings). The new tests probe the neighbours.
+
 ## Verified on the real ZBook (Windows 11, Python 3.14, 2026-10-09)
 - `pytest tests/`: **316 passed, 2 skipped**. The 2 skips are the symlink tests (`test_engine_core.py`, `test_path_boundary.py`), which Windows skips without Developer Mode or admin rights; 316 + 2 = 318.
 - Read-only plan (`list_directory` + `read_file`): `plan-create`, `plan-run`, `plan-show` all behaved as designed, plan `COMPLETED 2/2`, no checkpoint (correct for read-only).

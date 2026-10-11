@@ -158,7 +158,11 @@ def commit_plan_paths(
     plan_entries = [(code, p) for code, p in _parse_status_v2(status) if p in included]
     excluded_entries = [(code, p) for code, p in _parse_status_v2(all_status) if p not in included]
 
-    diff = GitInspector._run(["diff", "--", *specs], target)
+    # Against HEAD, not the index: `git commit -- <paths>` commits the working-tree content of
+    # these paths, so the preview must show working tree vs HEAD. A plain `git diff` (working tree
+    # vs index) showed nothing for a file that was already staged (Task 006 review, finding 2).
+    has_head = not GitInspector._run(["rev-parse", "--verify", "-q", "HEAD"], target).startswith("ERROR")
+    diff = GitInspector._run(["diff", *(["HEAD"] if has_head else []), "--", *specs], target)
     if diff.startswith("ERROR"):
         return diff
     new_files = [p for code, p in plan_entries if code == "??"]

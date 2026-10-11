@@ -1040,3 +1040,71 @@ def test_staged_rename_leaves_its_old_path_visible_in_the_excluded_list(env, cap
     out, will, other = _commit_preview(capsys, env, ["b.txt"])
     assert "b.txt" in will
     assert "a.txt" in other
+
+
+# ----------------------- Antigravity's review of 489939e (Task 006 report): F1-F4
+
+def test_rollback_does_not_treat_a_staged_edit_as_nothing_to_roll_back(env):
+    # F1: the index differs from the checkpoint but the working tree matches it, so
+    # `diff --stat <commit>` was empty and rollback skipped `reset --hard`, leaving the staged edit.
+    from jarvis.core import checkpoint as cp
+
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+    git(env.repo, "add", "a.txt")                       # index now holds v2
+    (env.repo / "a.txt").write_text("v1\n")             # working tree back to the checkpoint's v1
+
+    lines = []
+    cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lines.append)
+
+    assert "a.txt" in "\n".join(lines)                  # the preview names the staged difference
+    assert git(env.repo, "diff", "--cached", "--stat") == ""   # the index really was reset
+    assert env.store.load(plan.plan_id).status is PlanStatus.PENDING
+
+
+def test_commit_preview_shows_the_diff_of_a_file_that_is_already_staged(env, capsys):
+    # F2: `git diff -- <path>` is working tree vs index, so a staged plan file showed no Diff at all.
+    (env.repo / "a.txt").write_text("v2 staged\n")
+    git(env.repo, "add", "a.txt")
+    out, will, other = _commit_preview(capsys, env, ["a.txt"])
+    assert "+v2 staged" in out and "-v1" in out
+
+
+def test_rollback_refuses_a_line_ending_only_edit_made_during_the_prompt(env, monkeypatch):
+    # F3: with core.autocrlf=true git normalises CRLF to LF before diffing, so rewriting the
+    # file's line endings during the prompt left the snapshot identical and reset --hard ate it.
+    from jarvis.core import checkpoint as cp
+
+    git(env.repo, "config", "core.autocrlf", "true")
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+    (env.repo / "a.txt").write_bytes(b"v2\r\n")
+
+    def rewrite_with_lf(_prompt):
+        (env.repo / "a.txt").write_bytes(b"v2\n")
+        return True
+
+    monkeypatch.setattr(cp, "_confirm", rewrite_with_lf)
+    with pytest.raises(cp.CheckpointError, match="changed while you were deciding"):
+        cp.rollback(env.tracker, blocked.checkpoint_id, out=lambda *_: None)
+    assert (env.repo / "a.txt").read_bytes() == b"v2\n"
+
+
+def test_git_failure_while_rechecking_is_logged_and_says_nothing_was_changed(env, monkeypatch):
+    # F4: an error in the second snapshot escaped as a bare 'ERROR: ...' with no audit row.
+    from jarvis.core import checkpoint as cp
+
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+    real = cp._rollback_snapshot
+    calls = []
+
+    def second_call_fails(target, commit):
+        calls.append(1)
+        if len(calls) == 2:
+            raise cp.CheckpointError("ERROR: git command timed out.")
+        return real(target, commit)
+
+    monkeypatch.setattr(cp, "_rollback_snapshot", second_call_fails)
+    with pytest.raises(cp.CheckpointError, match="Nothing was changed"):
+        cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lambda *_: None)
+
+    assert (env.repo / "a.txt").read_text() == "v2\n"
+    assert ("git_rollback", "FAILURE") in rows(env)

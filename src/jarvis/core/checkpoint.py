@@ -64,12 +64,20 @@ def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, s
     """
     dropped = _git(target, "log", "--oneline", f"{commit}..HEAD")
     changes = _git(target, "diff", "--stat", commit)
+    # `diff <commit>` compares the WORKING TREE with the checkpoint. The index can differ while
+    # the working tree matches (an edit staged, then reverted on disk), and `reset --hard` resets
+    # the index too, so that difference must be listed and must stop a "nothing to roll back".
+    staged = _git(target, "diff", "--cached", "--stat", commit)
+    if staged and staged != changes:
+        changes = (changes + "\nStaged in the index and differing from the checkpoint:\n" + staged).strip()
     untracked = _git(target, "ls-files", "--others", "--exclude-standard")
     # Tracked now, absent from the checkpoint commit: reset --hard will delete these from disk.
     deleted = _git(target, "diff", "--name-only", "--diff-filter=A", commit)
     head = _git(target, "rev-parse", "HEAD")
     branch = _git(target, "branch", "--show-current")
-    full_diff = _git(target, "diff", "--binary", commit)
+    # autocrlf=false: with it on, git normalises CRLF to LF before diffing, so an edit that only
+    # changes line endings would leave the digest identical and be destroyed unseen.
+    full_diff = _git(target, "-c", "core.autocrlf=false", "diff", "--binary", commit)
     digest = hashlib.sha256(full_diff.encode("utf-8", errors="replace")).hexdigest()
     status = _git(target, "status", "--porcelain=v2", "-z", "--untracked-files=no")
     return dropped, changes, untracked, deleted, head, branch, digest, status
@@ -77,7 +85,20 @@ def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, s
 
 def _refuse_if_changed(tracker, cp_task_id, checkpoint_id, target, commit, snapshot) -> None:
     """The preview the human confirmed is only honest if nothing changed while the prompt was open."""
-    if _rollback_snapshot(target, commit) == snapshot:
+    try:
+        unchanged = _rollback_snapshot(target, commit) == snapshot
+    except CheckpointError as e:
+        # Cannot tell whether anything changed (git error or timeout): fail closed, and leave a trace.
+        tracker.log_execution(
+            cp_task_id, "git_rollback", "SAFE_WRITE", "FAILURE",
+            input_payload=f"checkpoint={checkpoint_id}",
+            output_payload=f"could not re-check the repository before rollback: {e}",
+        )
+        raise CheckpointError(
+            f"Could not verify the repository state before rolling back ({e}). Nothing was changed. "
+            f"Run `jarvis rollback --checkpoint {checkpoint_id}` again."
+        ) from e
+    if unchanged:
         return
     tracker.log_execution(
         cp_task_id, "git_rollback", "SAFE_WRITE", "FAILURE",
