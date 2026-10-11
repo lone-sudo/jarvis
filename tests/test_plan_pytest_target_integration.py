@@ -313,15 +313,18 @@ def test_unsafe_pytest_args_rejected_and_outside_directory_untouched(plan_env, a
 
 
 # ---------------------------------------------------------------------------
-# 4. Timeout: a hung target is killed at the timeout.
+# 4. Timeout: a hung target and its spawned child are both killed at timeout.
 # ---------------------------------------------------------------------------
 
 def test_hung_pytest_target_is_killed_at_timeout(plan_env):
     hung_test_code = (
         "import os\n"
+        "import subprocess\n"
+        "import sys\n"
         "import time\n\n"
         "def test_hang_forever():\n"
-        "    print(f'HUNG_PID={os.getpid()}', flush=True)\n"
+        "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "    print(f'HUNG_PID={os.getpid()} CHILD_PID={child.pid}', flush=True)\n"
         "    time.sleep(60)\n"
     )
     plan = _create_plan(
@@ -329,7 +332,7 @@ def test_hung_pytest_target_is_killed_at_timeout(plan_env):
         [
             {
                 "tool": "write_file",
-                "description": "Write a test that hangs",
+                "description": "Write a test that spawns a child and hangs",
                 "params": {"path": "test_hang.py", "content": hung_test_code},
                 "verify": {
                     "type": "pytest_target",
@@ -356,7 +359,49 @@ def test_hung_pytest_target_is_killed_at_timeout(plan_env):
     assert diag["kind"] == "VERIFICATION"
     assert "pytest timed out after" in diag["verifier_detail"]
 
-    match = re.search(r"HUNG_PID=(\d+)", diag["verifier_detail"])
-    assert match is not None, f"Expected HUNG_PID in verifier_detail, got: {diag['verifier_detail']}"
-    hung_pid = int(match.group(1))
+    match_parent = re.search(r"HUNG_PID=(\d+)", diag["verifier_detail"])
+    match_child = re.search(r"CHILD_PID=(\d+)", diag["verifier_detail"])
+    assert match_parent is not None and match_child is not None, (
+        f"Expected HUNG_PID and CHILD_PID in verifier_detail, got: {diag['verifier_detail']}"
+    )
+    hung_pid = int(match_parent.group(1))
+    child_pid = int(match_child.group(1))
     assert not _pid_is_alive(hung_pid), f"Hung pytest subprocess (PID {hung_pid}) was not killed!"
+    assert not _pid_is_alive(child_pid), f"Spawned child process (PID {child_pid}) was not killed!"
+
+
+# ---------------------------------------------------------------------------
+# 5. Environment allow-list: parent secrets are absent in child while PATH works.
+# ---------------------------------------------------------------------------
+
+def test_pytest_target_strips_parent_secrets_while_preserving_path(plan_env, monkeypatch):
+    secret = "TOP_SECRET_API_KEY_DO_NOT_LEAK"
+    monkeypatch.setenv("FAKE_API_KEY", secret)
+
+    test_code = (
+        "import os\n\n"
+        "def test_secret_absent_and_path_present():\n"
+        "    print('LEAK_CHECK=' + str(os.environ.get('FAKE_API_KEY')))\n"
+        "    assert os.environ.get('FAKE_API_KEY') is None\n"
+        "    assert bool(os.environ.get('PATH'))\n"
+        "    assert os.environ.get('PYTHONDONTWRITEBYTECODE') == '1'\n"
+    )
+    plan = _create_plan(
+        plan_env,
+        [
+            {
+                "tool": "write_file",
+                "params": {"path": "test_env.py", "content": test_code},
+                "verify": {
+                    "type": "pytest_target",
+                    "target": "test_env.py",
+                    "args": ["-s"],
+                },
+            }
+        ],
+    )
+
+    result = _run_plan(plan_env, plan)
+    assert result.status is PlanStatus.COMPLETED
+    assert secret not in "\n".join(plan_env.output_lines)
+

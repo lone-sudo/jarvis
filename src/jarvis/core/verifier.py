@@ -14,6 +14,7 @@ import ntpath
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 from typing import Any
@@ -57,6 +58,67 @@ SAFE_PYTEST_OPTIONS = {
     "--durations",
     "-r",
 }
+
+# Explicit allow-list of parent environment variables passed to pytest child processes
+ALLOWED_PYTEST_ENV_VARS = (
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_COLLATE",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NUMERIC",
+    "LC_TIME",
+)
+
+
+def _build_pytest_env() -> dict[str, str]:
+    """
+    Builds a minimal allow-listed environment for the pytest child process so parent
+    secrets (API keys, bot tokens, etc.) never reach the test or leak into diagnostics.
+    """
+    env: dict[str, str] = {}
+    for key in ALLOWED_PYTEST_ENV_VARS:
+        val = os.environ.get(key)
+        if val is not None:
+            env[key] = val
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _kill_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Terminates the pytest subprocess and any child processes it spawned."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
 
 def _is_absolute_path_arg(arg: str) -> bool:
@@ -315,37 +377,69 @@ class PytestTargetVerifier:
         if self.args:
             cmd.extend(self.args)
 
-        env = dict(os.environ)
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env = _build_pytest_env()
+
+        popen_kwargs: dict[str, Any] = {
+            "cwd": ctx.project_root,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "env": env,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
 
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=ctx.project_root,
-                capture_output=True,
-                text=True,
-                timeout=sub_timeout,
-                env=env,
-            )
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+        except FileNotFoundError:
+            return VerificationResult(ok=False, detail="Python executable not found to run pytest.")
+
+        try:
+            stdout_txt, stderr_txt = proc.communicate(timeout=sub_timeout)
             if proc.returncode == 0:
-                summary = proc.stdout.strip()
+                summary = stdout_txt.strip()
                 if len(summary) > 2000:
                     summary = summary[-2000:]
                 return VerificationResult(ok=True, detail=summary or "pytest passed.")
 
             # Preserves failure diagnostics (both stdout and stderr)
-            diagnostics = f"pytest failed with exit code {proc.returncode}:\n{proc.stdout}\n{proc.stderr}".strip()
+            diagnostics = f"pytest failed with exit code {proc.returncode}:\n{stdout_txt}\n{stderr_txt}".strip()
             return VerificationResult(ok=False, detail=diagnostics)
         except subprocess.TimeoutExpired as e:
-            stdout_txt = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode("utf-8", errors="replace") if e.stdout else "")
-            stderr_txt = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode("utf-8", errors="replace") if e.stderr else "")
+            _kill_process_tree(proc)
+            try:
+                post_out, post_err = proc.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired as e2:
+                post_out = e2.stdout
+                post_err = e2.stderr
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+
+            raw_out = post_out if post_out is not None else e.stdout
+            raw_err = post_err if post_err is not None else e.stderr
+            stdout_txt = (
+                raw_out
+                if isinstance(raw_out, str)
+                else (raw_out.decode("utf-8", errors="replace") if raw_out else "")
+            )
+            stderr_txt = (
+                raw_err
+                if isinstance(raw_err, str)
+                else (raw_err.decode("utf-8", errors="replace") if raw_err else "")
+            )
             captured = f"{stdout_txt}\n{stderr_txt}".strip()
             detail = f"pytest timed out after {sub_timeout:.1f}s."
             if captured:
                 detail += f"\nOutput before timeout:\n{captured}"
             return VerificationResult(ok=False, detail=detail)
-        except FileNotFoundError:
-            return VerificationResult(ok=False, detail="Python executable not found to run pytest.")
 
 
 class GitCommitVerifier:
