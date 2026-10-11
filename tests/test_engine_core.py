@@ -727,6 +727,7 @@ def test_preview_does_not_follow_a_symlink_for_new_file_content(env, capsys):
     out, _, _ = _commit_preview(capsys, env, ["link.txt"])
 
     assert "TOP SECRET" not in out
+    assert "content not shown" in out                      # a vacuous pass (file dropped) would fail here
 
 
 def test_commit_directly_after_commit_is_rejected_at_validation(env):
@@ -822,3 +823,97 @@ def test_rollback_refuses_if_the_repository_changed_while_the_prompt_was_open(en
     assert "b.txt" in "\n".join(lines)
     assert (env.repo / "b.txt").read_text() == "b original\n"
     assert env.store.load(plan.plan_id).status is PlanStatus.PENDING
+
+
+# ----------------------- Antigravity's review of 854ab89 (Task 003), findings 2-4
+
+def _status_z(*entries):
+    return "\0".join(entries) + "\0"
+
+
+def test_status_parser_keeps_spaces_and_skips_the_original_path_of_a_rename():
+    from jarvis.core.plan_commit import _parse_status_v2
+
+    out = _status_z(
+        "1 .M N... 100644 100644 100644 aaaa bbbb my   file.txt",
+        "2 R. N... 100644 100644 100644 aaaa bbbb R100 new   name.txt", "old name.txt",
+        "u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict file.txt",
+        "? caf\u00e9 \u65e5\u672c.txt",
+    )
+    assert _parse_status_v2(out) == [
+        (" M", "my   file.txt"), ("R ", "new   name.txt"), ("UU", "conflict file.txt"), ("??", "caf\u00e9 \u65e5\u672c.txt"),
+    ]                                                    # 'old name.txt' is not reported as a separate entry
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="quote, backslash and tab are not legal in Windows file names")
+def test_preview_handles_file_names_git_would_quote(env, capsys):
+    # finding 4: git C-quotes names containing a quote or tab (even with quotepath off).
+    # (A backslash is deliberately not tested: plan paths treat it as a separator, the Windows
+    # convention, so such a name is refused rather than mis-committed.)
+    odd = 'a"b\td.txt'
+    (env.repo / odd).write_text("odd name\n")
+    (env.repo / "other.txt").write_text("stray\n")
+
+    _, will, other = _commit_preview(capsys, env, [odd])
+
+    assert odd in will and odd not in other
+    assert "other.txt" in other
+
+
+def test_preview_lists_non_ascii_names_correctly(env, capsys):
+    (env.repo / "caf\u00e9 \u65e5\u672c.txt").write_text("hello\n")
+    (env.repo / "quote_\u201d.txt").write_text("stray\n")
+
+    _, will, other = _commit_preview(capsys, env, ["caf\u00e9 \u65e5\u672c.txt"])
+
+    assert "caf\u00e9 \u65e5\u672c.txt" in will
+    assert "quote_\u201d.txt" in other
+
+
+def test_new_file_preview_does_not_read_through_a_symlinked_parent_directory(env):
+    # finding 2: only the final path component was checked, so 'link/secret.txt' leaked the target.
+    from jarvis.core.plan_commit import _new_file_preview
+
+    outside = env.workspace / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("TOP_SECRET_OUTSIDE_PROJECT\n")
+    try:
+        (env.repo / "junc").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need Developer Mode on Windows")
+
+    text = _new_file_preview(env.repo, "junc/secret.txt")
+
+    assert "TOP_SECRET_OUTSIDE_PROJECT" not in text
+    assert "outside the project" in text
+
+
+def test_new_file_preview_reads_only_what_it_shows(env, monkeypatch):
+    # finding 3: read_bytes() loaded the entire file before slicing off 4 KB.
+    from pathlib import Path
+    from jarvis.core.plan_commit import MAX_DIFF_PREVIEW, _new_file_preview
+
+    (env.repo / "big.txt").write_text("x" * (MAX_DIFF_PREVIEW * 50))
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError("read the whole file")))
+
+    text = _new_file_preview(env.repo, "big.txt")
+
+    assert "[file preview truncated]" in text
+    assert len(text) < MAX_DIFF_PREVIEW + 200
+
+
+def test_cli_output_survives_characters_the_console_codec_cannot_encode(monkeypatch):
+    # finding 3: print() raised UnicodeEncodeError on a Windows cp1252 console or pipe, mid-command.
+    import io
+    import sys
+    from jarvis.interface import cli
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stream)
+    cli._make_output_safe()
+
+    print("replacement char: \ufffd, emoji: \U0001F680, plain: ok")
+    stream.flush()
+
+    assert raw.getvalue().endswith(b"plain: ok\n")

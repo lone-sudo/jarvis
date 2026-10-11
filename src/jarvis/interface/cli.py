@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 
 from jarvis.state.tracker import StateTracker
 from jarvis.state.inbox import InboxStore
@@ -727,7 +728,24 @@ def cmd_doctor(args):
         raise SystemExit(1)
 
 
+def _make_output_safe() -> None:
+    """
+    Printing a character the console codec cannot encode (a replacement character from a
+    badly-encoded file, an emoji) raises UnicodeEncodeError on Windows when output is
+    redirected (cp1252), and would crash a command half-way, after a prompt. Make unencodable
+    characters print as '?' instead. Only affects characters that would have crashed.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main():
+    _make_output_safe()
     parser = argparse.ArgumentParser(prog="jarvis", description="Jarvis Personal AI Operating Layer")
     subparsers = parser.add_subparsers(dest="command")
 

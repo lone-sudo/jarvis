@@ -47,31 +47,39 @@ def _clean_paths(paths: list[str]) -> list[str]:
 
 def _parse_status_v2(output: str) -> list[tuple[str, str]]:
     """
-    Parses `git status --porcelain=v2` into (two-letter code, path) pairs.
+    Parses `git status --porcelain=v2 -z` into (two-letter code, path) pairs.
 
-    Why v2 and not `--short`: GitInspector._run() strips its output, which removes
-    the leading space of the FIRST line (" M file" becomes "M file"). Slicing that
-    line at a fixed column then mangles the file name and the staged/unstaged code.
-    v2 lines always start with a digit, '?' or 'u', so nothing is lost. A leading
-    space can never be stripped. (Found in review of commit 0a2b4bc.)
+    Two traps, both found in review (0a2b4bc, then Antigravity's Task 003):
+      * GitInspector._run() strips its output, which removes the leading space of the FIRST
+        line of `--short` output (" M file" becomes "M file"), so slicing at a fixed column
+        mangled the name. v2 entries always start with a digit, '?' or 'u'.
+      * Without -z, git wraps any name containing a quote, backslash, tab or newline in
+        C-style quotes with escapes. With -z entries are NUL-separated and paths are never
+        quoted, so no unescaping is needed and nothing can be mis-parsed.
+    A rename entry ('2') is followed by one extra NUL-separated token: the original path.
     """
     entries: list[tuple[str, str]] = []
-    for line in output.splitlines():
-        kind = line[:1]
+    tokens = output.split("\0")
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        kind = tok[:1]
         if kind == "?":
-            entries.append(("??", line[2:].strip('"')))
+            entries.append(("??", tok[2:]))
         elif kind == "1":
-            parts = line.split(" ", 8)
+            parts = tok.split(" ", 8)
             if len(parts) == 9:
-                entries.append((parts[1].replace(".", " "), parts[8].strip('"')))
+                entries.append((parts[1].replace(".", " "), parts[8]))
         elif kind == "2":
-            parts = line.split(" ", 9)
+            parts = tok.split(" ", 9)
             if len(parts) == 10:
-                entries.append((parts[1].replace(".", " "), parts[9].split("\t")[0].strip('"')))
+                entries.append((parts[1].replace(".", " "), parts[9]))
+            i += 1  # skip the original path that follows a rename entry
         elif kind == "u":
-            parts = line.split(" ", 10)
+            parts = tok.split(" ", 10)
             if len(parts) == 11:
-                entries.append((parts[1].replace(".", " "), parts[10].strip('"')))
+                entries.append((parts[1].replace(".", " "), parts[10]))
     return entries
 
 
@@ -79,14 +87,21 @@ def _new_file_preview(project_root: Path, rel: str) -> str:
     """
     `git diff` shows nothing for a file git does not track yet, so a brand-new file would
     reach the [y/N] prompt with no content shown. Build a preview from the file itself.
-    Symlinks are not followed (a preview must never read outside the project).
+    The preview must never read outside the project: the file and EVERY parent directory are
+    resolved first, so a symlinked parent or a Windows junction cannot lead out of it.
     """
-    path = project_root / rel
     header = f"--- /dev/null\n+++ b/{rel}"
-    if path.is_symlink() or not path.is_file():
+    path = project_root / rel
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(project_root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return f"{header}\n(new file; content not shown: it resolves outside the project)"
+    if path.is_symlink() or not resolved.is_file():
         return f"{header}\n(new file; content not shown)"
     try:
-        data = path.read_bytes()[: MAX_DIFF_PREVIEW + 1]
+        with resolved.open("rb") as handle:       # read only what the preview shows, never the whole file
+            data = handle.read(MAX_DIFF_PREVIEW + 1)
     except OSError as e:
         return f"{header}\n(new file; could not read it for preview: {e})"
     if b"\0" in data:
@@ -122,10 +137,10 @@ def commit_plan_paths(
         return error
 
     specs = [_literal(p) for p in paths]
-    # core.quotepath=off keeps non-ASCII names readable; -uall lists untracked files one by
-    # one instead of collapsing a new directory to "dir/" (which made a file this plan wrote
-    # appear under "NOT part of this commit").
-    status_args = ["-c", "core.quotepath=off", "status", "--porcelain=v2", "--untracked-files=all"]
+    # -z: NUL-separated, never-quoted paths (see _parse_status_v2). -uall lists untracked files
+    # one by one instead of collapsing a new directory to "dir/" (which made a file this plan
+    # wrote appear under "NOT part of this commit").
+    status_args = ["status", "--porcelain=v2", "-z", "--untracked-files=all"]
     status = GitInspector._run([*status_args, "--", *specs], target)
     if status.startswith("ERROR"):
         return status
