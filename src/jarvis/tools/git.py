@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -13,13 +14,27 @@ def _confirm(prompt: str) -> bool:
 class GitInspector:
     @staticmethod
     def _run(args: list[str], cwd: Path) -> str:
+        # Caller-supplied Git config options are global options and must stay
+        # before the subcommand. Locate that subcommand to apply safe defaults.
+        command_index = 0
+        while command_index < len(args) and args[command_index] == "-c":
+            command_index += 2
+        subcommand = args[command_index] if command_index < len(args) else None
+        prefix = args[:command_index]
+        command_args = args[command_index:]
+        safe_args = [*prefix, "-c", "core.fsmonitor=false"]
+        if subcommand != "commit":
+            safe_args.extend(["-c", f"core.hooksPath={os.devnull}"])
+        if subcommand == "diff":
+            command_args = ["diff", "--no-ext-diff", "--no-textconv", *command_args[1:]]
+        safe_args.extend(command_args)
         try:
             # git writes UTF-8. `text=True` alone decodes with the machine's locale codec (cp1252
             # on Windows), which mangles non-ASCII file names and CRASHES (UnicodeDecodeError in
             # the reader thread, then result.stdout is None) on bytes such as 0x9d, found in a
             # curly quote. Decode as UTF-8 and never raise on a bad byte.
             result = subprocess.run(
-                ["git", *args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace",
+                ["git", *safe_args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace",
                 check=True, timeout=15,
             )
             return result.stdout.strip()
