@@ -56,6 +56,16 @@ Every finding below was reproduced before it was rated or fixed. Gemini labelled
 
 Open decision, left at the safe default: a plan's `git_commit` still runs the repository's own hooks (for example `pre-commit`). Their code is not shown at the `[y/N]`. Documented rather than blocked, because hooks are normally wanted in your own repositories.
 
+## Antigravity's Task 005 review of 231e55b and 7f52fc1 (2026-10-11)
+All four open findings reproduced in the sandbox with a failing test first; fixed in `489939e`.
+| Finding | Rating | Fix |
+|---|---|---|
+| F1: the rollback re-check compared `diff --stat`, which counts lines, so an edit with the same line count passed and `reset --hard` destroyed it | High (data loss; I agree) | snapshot now includes a SHA-256 of `git diff --binary <commit>` and the tracked status |
+| F2: a branch created at the same commit while the prompt was open: `reset --hard` moved the new branch | Medium | snapshot includes `branch --show-current` |
+| F3: the state-only rollback path skipped the re-check | Low | shared `_refuse_if_changed` used by both paths |
+| F5: a staged rename hid the old path from "NOT part of this commit" | Low | `--no-renames` in `commit_plan_paths` |
+F4 (the non-ASCII test needing the UTF-8 decode) was already fixed in `938aa3d`. 5 new tests: 4 fail on the old code, 1 guards against the snapshot being too sensitive. Mistake worth recording: my first re-check (`231e55b`) was tested only with an edit that changed the line counts, so it passed its own test. The new test uses an edit with identical counts.
+
 ## Verified on the real ZBook (Windows 11, Python 3.14, 2026-10-09)
 - `pytest tests/`: **316 passed, 2 skipped**. The 2 skips are the symlink tests (`test_engine_core.py`, `test_path_boundary.py`), which Windows skips without Developer Mode or admin rights; 316 + 2 = 318.
 - Read-only plan (`list_directory` + `read_file`): `plan-create`, `plan-run`, `plan-show` all behaved as designed, plan `COMPLETED 2/2`, no checkpoint (correct for read-only).
