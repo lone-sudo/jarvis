@@ -23,6 +23,7 @@ it will delete, so nothing disappears without being listed.
 """
 
 import hashlib
+import os
 import uuid
 from pathlib import Path
 
@@ -47,6 +48,42 @@ def _git(target: Path, *args: str) -> str:
     if out.startswith("ERROR"):
         raise CheckpointError(out)
     return out
+
+
+def _raw_content_digest(target: Path, commit: str) -> str:
+    """
+    SHA-256 over the RAW BYTES on disk of every tracked file that differs from the checkpoint (in
+    the working tree or the index), which are the files `reset --hard` can overwrite.
+
+    Why not let git do it: with core.autocrlf=true git normalises CRLF to LF before diffing, so an
+    edit that only changes line endings is invisible to `git diff` (Task 006 review, F3). Forcing
+    `-c core.autocrlf=false` onto `git diff` fixes that but makes the output depend on whether the
+    index entry is "racy": git trusts the index blob while the entry is stat-clean and reads the
+    working tree otherwise, and an ordinary `git status` flips that between two snapshots, which
+    produced a false "repository changed" on the ZBook. Reading the bytes ourselves is immune to both.
+    """
+    names: set[str] = set()
+    for flag in ([], ["--cached"]):
+        out = _git(target, "diff", *flag, "--name-only", "-z", commit)
+        names.update(n for n in out.split("\0") if n)
+    digest = hashlib.sha256()
+    for name in sorted(names):
+        path = target / name
+        digest.update(name.encode("utf-8", errors="replace") + b"\0")
+        try:
+            if path.is_symlink():                      # never follow a link: hash where it points
+                digest.update(b"L" + os.readlink(path).encode("utf-8", errors="replace"))
+            elif path.is_file():
+                digest.update(b"F")
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(chunk)
+            else:
+                digest.update(b"M")                    # missing, or not a regular file
+        except OSError as e:
+            digest.update(b"E" + str(e.errno).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, str, str, str, str]:
@@ -75,10 +112,11 @@ def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, s
     deleted = _git(target, "diff", "--name-only", "--diff-filter=A", commit)
     head = _git(target, "rev-parse", "HEAD")
     branch = _git(target, "branch", "--show-current")
-    # autocrlf=false: with it on, git normalises CRLF to LF before diffing, so an edit that only
-    # changes line endings would leave the digest identical and be destroyed unseen.
-    full_diff = _git(target, "-c", "core.autocrlf=false", "diff", "--binary", commit)
-    digest = hashlib.sha256(full_diff.encode("utf-8", errors="replace")).hexdigest()
+    full_diff = _git(target, "diff", "--binary", commit)
+    digest = (
+        hashlib.sha256(full_diff.encode("utf-8", errors="replace")).hexdigest()
+        + ":" + _raw_content_digest(target, commit)
+    )
     status = _git(target, "status", "--porcelain=v2", "-z", "--untracked-files=no")
     return dropped, changes, untracked, deleted, head, branch, digest, status
 
