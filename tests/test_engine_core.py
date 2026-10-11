@@ -616,9 +616,9 @@ def test_plan_commit_with_other_files_already_staged_still_commits_only_plan_fil
 
 
 def test_commit_step_needs_an_earlier_write_step(env):
-    with pytest.raises(PlanFormatError, match="written by earlier write_file"):
+    with pytest.raises(PlanFormatError, match="write_file steps since the previous commit"):
         make_plan(env, [commit_step()])
-    with pytest.raises(PlanFormatError, match="written by earlier write_file"):
+    with pytest.raises(PlanFormatError, match="write_file steps since the previous commit"):
         make_plan(env, [commit_step(), write("late.txt", "x\n")])
 
 
@@ -653,3 +653,138 @@ def test_declined_plan_commit_changes_nothing(env):
     assert "declined by user" in out
     assert git(env.repo, "rev-parse", "HEAD") == before
     assert git(env.repo, "diff", "--cached", "--name-only") == ""
+
+
+# ------------------------------- review of 0a2b4bc by Antigravity (findings 1-5)
+# Each test below failed on the code as merged, and was written from a reproduced run.
+
+def _commit_preview(capsys, env, paths, message="m"):
+    from jarvis.core.plan_commit import commit_plan_paths
+
+    result = commit_plan_paths("proj", message, paths, auto_confirm=False)
+    assert result == "ERROR: Access denied by policy. (declined by user)"   # declined: nothing committed
+    out = capsys.readouterr().out
+    will = out.split("WILL be committed (and nothing else):")[1].split("\nDiff:")[0].split("Other files")[0]
+    other = out.split("NOT part of this commit:")[1] if "NOT part of this commit:" in out else ""
+    return out, will, other
+
+
+def test_preview_lists_untracked_file_whose_name_is_a_suffix_of_a_planned_file(env, capsys):
+    # finding 1: the stripped first status line made 'xbar.txt' look like 'bar.txt', hiding the stray.
+    (env.repo / "xbar.txt").write_text("v1\n")
+    git(env.repo, "add", "xbar.txt"); git(env.repo, "commit", "-m", "add xbar")
+    (env.repo / "xbar.txt").write_text("v2\n")
+    (env.repo / "bar.txt").write_text("stray\n")
+
+    _, will, other = _commit_preview(capsys, env, ["xbar.txt"])
+
+    assert "xbar.txt" in will and "bar.txt" not in will.replace("xbar.txt", "")
+    assert "bar.txt" in other.replace("xbar.txt", "")
+
+
+def test_preview_does_not_list_a_committed_file_as_excluded_or_hide_a_real_exclusion(env, capsys):
+    # finding 1 (second case): both tracked files modified, only b.txt is the plan's.
+    (env.repo / "b.txt").write_text("v1\n")
+    git(env.repo, "add", "b.txt"); git(env.repo, "commit", "-m", "add b")
+    (env.repo / "a.txt").write_text("v2\n")
+    (env.repo / "b.txt").write_text("v2\n")
+
+    _, will, other = _commit_preview(capsys, env, ["b.txt"])
+
+    assert "b.txt" in will and "a.txt" not in will
+    assert "a.txt" in other and "b.txt" not in other
+
+
+def test_preview_expands_new_directories_so_planned_files_are_not_shown_as_excluded(env, capsys):
+    # finding 2: untracked 'tests/' collapsed to one line that never matched 'tests/t.py'.
+    (env.repo / "tests").mkdir()
+    (env.repo / "tests" / "t.py").write_text("x = 1\n")
+
+    _, will, other = _commit_preview(capsys, env, ["tests/t.py"])
+
+    assert "tests/t.py" in will
+    assert "tests" not in other
+
+
+def test_preview_shows_the_content_of_a_brand_new_file(env, capsys):
+    # finding 4: git diff is empty for untracked files, so the [y/N] prompt showed no content at all.
+    (env.repo / "new.txt").write_text("hello preview\nsecond line\n")
+
+    out, _, _ = _commit_preview(capsys, env, ["new.txt"])
+
+    diff = out.split("\nDiff:")[1]
+    assert "+++ b/new.txt" in diff and "+hello preview" in diff and "+second line" in diff
+
+
+def test_preview_does_not_follow_a_symlink_for_new_file_content(env, capsys):
+    secret = env.workspace / "secret.txt"
+    secret.write_text("TOP SECRET\n")
+    try:
+        (env.repo / "link.txt").symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need Developer Mode on Windows")
+
+    out, _, _ = _commit_preview(capsys, env, ["link.txt"])
+
+    assert "TOP SECRET" not in out
+
+
+def test_commit_directly_after_commit_is_rejected_at_validation(env):
+    # finding 3: [write, commit, commit] used to validate, then block at run time with 'nothing to commit'.
+    with pytest.raises(PlanFormatError, match="since the previous commit"):
+        make_plan(env, [write("c.txt", "x\n"), commit_step("c1"), commit_step("c2")])
+    make_plan(env, [write("c.txt", "x\n"), commit_step("c1"), write("d.txt", "y\n"), commit_step("c2")])
+
+
+def test_second_commit_contains_only_files_written_since_the_first(env):
+    # finding 3: the second commit used to be handed every earlier write, including already-committed ones.
+    plan = make_plan(env, [write("c.txt", "x\n"), commit_step("c1"), write("d.txt", "y\n"), commit_step("c2")])
+    done = make_engine(env).run(plan.plan_id)
+    assert done.status is PlanStatus.COMPLETED
+
+    assert git(env.repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["d.txt"]
+    assert git(env.repo, "show", "--name-only", "--format=", "HEAD~1").splitlines() == ["c.txt"]
+
+    paths = ExecutionEngine._invoke_params(done, 3, done.steps[3])["_paths"]
+    assert paths == ["d.txt"]
+
+
+def test_rollback_of_a_plan_that_only_created_untracked_files_resets_the_plan(env):
+    # finding 5: rollback said 'Nothing to roll back' and left the plan BLOCKED forever.
+    from jarvis.core import checkpoint as cp
+
+    plan = make_plan(env, [write("n.txt", "made by plan\n", verify={"type": "fail"})])
+    blocked = make_engine(env).run(plan.plan_id)
+    assert blocked.status is PlanStatus.BLOCKED and blocked.checkpoint_id
+
+    lines = []
+    msg = cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lines.append)
+
+    assert env.store.load(plan.plan_id).status is PlanStatus.PENDING
+    assert (env.repo / "n.txt").read_text() == "made by plan\n"            # untracked files are never deleted
+    assert "n.txt" in "\n".join(lines)                                      # and the preview names them
+    assert "Untracked files the plan created are still on disk" in msg
+    assert "Nothing to roll back" not in msg
+
+
+def test_declining_a_state_only_rollback_changes_nothing(env):
+    from jarvis.core import checkpoint as cp
+
+    plan = make_plan(env, [write("n.txt", "x\n", verify={"type": "fail"})])
+    blocked = make_engine(env).run(plan.plan_id)
+
+    msg = cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=False, out=lambda *_: None)
+
+    assert msg == "Rollback declined. Nothing was changed."
+    assert env.store.load(plan.plan_id).status is PlanStatus.BLOCKED
+
+
+def test_rollback_with_nothing_to_do_and_no_stuck_plan_still_says_so(env):
+    from jarvis.core import checkpoint as cp
+
+    plan = make_plan(env, [write("n.txt", "x\n", verify={"type": "fail"})])
+    blocked = make_engine(env).run(plan.plan_id)
+    cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lambda *_: None)   # resets the plan
+
+    msg = cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lambda *_: None)
+    assert msg.startswith("Nothing to roll back")

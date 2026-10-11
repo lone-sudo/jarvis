@@ -108,6 +108,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 }
 
 
+def _steps_since_last_commit(steps: list) -> list:
+    """The steps after the most recent git_commit in `steps` (all of them if there is none)."""
+    for j in range(len(steps) - 1, -1, -1):
+        if steps[j].tool == "git_commit":
+            return steps[j + 1:]
+    return list(steps)
+
+
 def validate_plan(plan: ExecutionPlan) -> None:
     """
     Static, side-effect-free checks used both when a plan is created and
@@ -131,10 +139,13 @@ def validate_plan(plan: ExecutionPlan) -> None:
                 raise PlanFormatError(f"step {i} ({step.tool}): param '{key}' must be a string.")
         if step.tool == "git_commit" and not step.params["message"].strip():
             raise PlanFormatError(f"step {i} (git_commit): 'message' must not be empty.")
-        if step.tool == "git_commit" and not any(t.tool == "write_file" for t in plan.steps[: i - 1]):
+        if step.tool == "git_commit" and not any(
+            t.tool == "write_file" for t in _steps_since_last_commit(plan.steps[: i - 1])
+        ):
             raise PlanFormatError(
-                f"step {i} (git_commit): a plan's commit only includes files written by earlier "
-                f"write_file steps of the same plan, and none come before this step."
+                f"step {i} (git_commit): a plan's commit only includes files written by "
+                f"write_file steps since the previous commit (or the start of the plan), "
+                f"and none come before this step."
             )
         if spec.path_param in step.params and not step.params[spec.path_param].strip() \
                 and step.tool != "list_directory":
@@ -383,7 +394,9 @@ class ExecutionEngine:
         params = dict(step.params)
         if step.tool == "git_commit":
             written: list[str] = []
-            for prior in plan.steps[:i]:
+            # Only files written since the previous commit: earlier ones are already committed,
+            # and re-sending them would sweep in any change made to them outside the plan.
+            for prior in _steps_since_last_commit(plan.steps[:i]):
                 if prior.tool == "write_file" and prior.status is StepStatus.SUCCEEDED:
                     path = prior.params.get("path")
                     if isinstance(path, str) and path not in written:

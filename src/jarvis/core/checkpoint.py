@@ -25,6 +25,7 @@ it will delete, so nothing disappears without being listed.
 import uuid
 from pathlib import Path
 
+from jarvis.core.plan import PlanStatus
 from jarvis.policy.rules import ActionTier
 from jarvis.state.database import get_connection
 from jarvis.state.plan_store import PlanStore, get_task_row
@@ -144,8 +145,44 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
     # Tracked now, absent from the checkpoint commit: reset --hard will delete these from disk.
     deleted = _git(target, "diff", "--name-only", "--diff-filter=A", commit)
 
+    store = PlanStore(tracker.db_path)
+    linked = [p for p in store.list_for_task(cp["task_id"]) if p.checkpoint_id == checkpoint_id]
+
     if not dropped and not changes:
-        return f"Nothing to roll back: {project_root} already matches checkpoint {checkpoint_id}."
+        # A plan that only created untracked files before failing leaves nothing for git to
+        # undo, but it is still BLOCKED. Rolling back must let it be re-run from the start,
+        # and must say plainly that the files it created are still on disk.
+        stuck = [p for p in linked if p.status is not PlanStatus.PENDING]
+        if not stuck:
+            return f"Nothing to roll back: {project_root} already matches checkpoint {checkpoint_id}."
+        out(f"\n--- Proposed rollback of {target} to checkpoint {checkpoint_id} ({commit[:10]}) ---")
+        out("No tracked files differ from the checkpoint, so git has nothing to reset.")
+        if untracked:
+            out("Untracked files (NOT touched, still on disk, listed for your information):")
+            out(untracked)
+        out(f"Plan(s) that will be reset to PENDING: {', '.join(p.plan_id for p in stuck)}")
+        out("---")
+        confirmed = auto_confirm if auto_confirm is not None else _confirm(
+            "Reset the plan state above? No files will be changed."
+        )
+        if not confirmed:
+            tracker.log_execution(
+                cp["task_id"], "git_rollback", "SAFE_WRITE", "REJECTED_BY_POLICY",
+                input_payload=f"checkpoint={checkpoint_id}", output_payload="declined by user",
+            )
+            return "Rollback declined. Nothing was changed."
+        for plan in stuck:
+            plan.reset_for_rerun()
+            store.save(plan)
+        tracker.log_execution(
+            cp["task_id"], "git_rollback", "SAFE_WRITE", "SUCCESS",
+            input_payload=f"checkpoint={checkpoint_id}", output_payload="plan state reset; no git changes",
+        )
+        msg = (f"No tracked files to roll back in {project_root}. Plan(s) reset to PENDING: "
+               f"{', '.join(p.plan_id for p in stuck)}.")
+        if untracked:
+            msg += " Untracked files the plan created are still on disk."
+        return msg
 
     out(f"\n--- Proposed rollback of {target} to checkpoint {checkpoint_id} ({commit[:10]}) ---")
     if dropped:
@@ -181,13 +218,11 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
         )
         raise
 
-    store = PlanStore(tracker.db_path)
     reset_ids = []
-    for plan in store.list_for_task(cp["task_id"]):
-        if plan.checkpoint_id == checkpoint_id:
-            plan.reset_for_rerun()
-            store.save(plan)
-            reset_ids.append(plan.plan_id)
+    for plan in linked:
+        plan.reset_for_rerun()
+        store.save(plan)
+        reset_ids.append(plan.plan_id)
 
     tracker.log_execution(
         cp["task_id"], "git_rollback", "SAFE_WRITE", "SUCCESS",
