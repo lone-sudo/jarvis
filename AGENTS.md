@@ -44,6 +44,14 @@ Rules that follow:
   the fix in words.
 - **Reviewers reproduce before claiming.** Back a finding with a run, or label it "not reproduced".
 
+## How we work (cost and coordination, decided by Lone 2026-10-11)
+- **Antigravity** is the standing reviewer and test engineer. Its review is how a change gets a second pair of eyes.
+- **Codex** gets only tasks that are truly bounded: named files, a written contract, tests that say when it is done.
+- **Gemini** is called only for a security audit at a milestone, and is given the actual code (a bundle), never a description.
+- **One message per tool per milestone.** Batch everything a tool needs (all reviews, all tasks) into a single message. Do not drip-feed.
+- **Every report-back says "pushed to origin: yes/no".** An unpushed commit cannot be reviewed.
+- Changes by the author of a file are reviewed by another model before Lone merges, including fixes Claude makes to its own files.
+
 ## Branches and merging
 - `main` is protected and fast-forward only, after the full test suite passes. Only Lone merges.
 - One feature branch per stream, named `feature/<owner>-<milestone>-<topic>`, cut from the current
@@ -78,7 +86,7 @@ When Claude writes a task for Antigravity or Codex, it uses this shape and nothi
 3. **Contract**: the interface to implement, or a link to the ADR section.
 4. **Acceptance**: the tests that must pass, plus the behaviours to be added as new tests.
 5. **Out of scope**: what not to touch.
-6. **Report back**: branch, commit hash, test count and platform, and anything you were unsure about.
+6. **Report back**: branch, commit hash, **pushed to origin: yes/no**, test count and platform, and anything you were unsure about.
 
 ## Current state and where to look
 - Architecture decisions: `docs/adrs/` (ADR-0005 is the execution engine and its verifier contract).

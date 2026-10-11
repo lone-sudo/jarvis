@@ -13,7 +13,7 @@ earlier `write_file` steps of the same plan wrote. Nothing else is
 swept in, and the preview names what is being left out.
 """
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from jarvis.policy.rules import ActionTier
 from jarvis.tools.git import GitInspector
@@ -45,6 +45,58 @@ def _clean_paths(paths: list[str]) -> list[str]:
     return cleaned
 
 
+def _parse_status_v2(output: str) -> list[tuple[str, str]]:
+    """
+    Parses `git status --porcelain=v2` into (two-letter code, path) pairs.
+
+    Why v2 and not `--short`: GitInspector._run() strips its output, which removes
+    the leading space of the FIRST line (" M file" becomes "M file"). Slicing that
+    line at a fixed column then mangles the file name and the staged/unstaged code.
+    v2 lines always start with a digit, '?' or 'u', so nothing is lost. A leading
+    space can never be stripped. (Found in review of commit 0a2b4bc.)
+    """
+    entries: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        kind = line[:1]
+        if kind == "?":
+            entries.append(("??", line[2:].strip('"')))
+        elif kind == "1":
+            parts = line.split(" ", 8)
+            if len(parts) == 9:
+                entries.append((parts[1].replace(".", " "), parts[8].strip('"')))
+        elif kind == "2":
+            parts = line.split(" ", 9)
+            if len(parts) == 10:
+                entries.append((parts[1].replace(".", " "), parts[9].split("\t")[0].strip('"')))
+        elif kind == "u":
+            parts = line.split(" ", 10)
+            if len(parts) == 11:
+                entries.append((parts[1].replace(".", " "), parts[10].strip('"')))
+    return entries
+
+
+def _new_file_preview(project_root: Path, rel: str) -> str:
+    """
+    `git diff` shows nothing for a file git does not track yet, so a brand-new file would
+    reach the [y/N] prompt with no content shown. Build a preview from the file itself.
+    Symlinks are not followed (a preview must never read outside the project).
+    """
+    path = project_root / rel
+    header = f"--- /dev/null\n+++ b/{rel}"
+    if path.is_symlink() or not path.is_file():
+        return f"{header}\n(new file; content not shown)"
+    try:
+        data = path.read_bytes()[: MAX_DIFF_PREVIEW + 1]
+    except OSError as e:
+        return f"{header}\n(new file; could not read it for preview: {e})"
+    if b"\0" in data:
+        return f"{header}\n(new binary file; content not shown)"
+    truncated = len(data) > MAX_DIFF_PREVIEW
+    text = data[:MAX_DIFF_PREVIEW].decode("utf-8", errors="replace")
+    body = "\n".join("+" + line for line in text.splitlines())
+    return f"{header}\n@@ new file @@\n{body}" + ("\n... [file preview truncated]" if truncated else "")
+
+
 def commit_plan_paths(
     project_root: str, message: str, paths: list[str], auto_confirm: "bool | None" = None
 ) -> str:
@@ -70,29 +122,45 @@ def commit_plan_paths(
         return error
 
     specs = [_literal(p) for p in paths]
-    status = GitInspector._run(["status", "--short", "--", *specs], target)
+    # core.quotepath=off keeps non-ASCII names readable; -uall lists untracked files one by
+    # one instead of collapsing a new directory to "dir/" (which made a file this plan wrote
+    # appear under "NOT part of this commit").
+    status_args = ["-c", "core.quotepath=off", "status", "--porcelain=v2", "--untracked-files=all"]
+    status = GitInspector._run([*status_args, "--", *specs], target)
     if status.startswith("ERROR"):
         return status
     if not status:
         return "ERROR: Nothing to commit: the files this plan wrote are unchanged (or git-ignored): " + ", ".join(paths)
+    all_status = GitInspector._run(status_args, target)
+    if all_status.startswith("ERROR"):
+        return all_status
+
+    # What gets committed is exactly the plan's own paths (the pathspec below), so that is
+    # also what the preview must call "included", never something re-derived from output text.
+    included = set(paths)
+    plan_entries = [(code, p) for code, p in _parse_status_v2(status) if p in included]
+    excluded_entries = [(code, p) for code, p in _parse_status_v2(all_status) if p not in included]
 
     diff = GitInspector._run(["diff", "--", *specs], target)
-    all_status = GitInspector._run(["status", "--short"], target)
-    included = {line[3:].strip().strip('"') for line in status.splitlines()}
-    excluded = [ln for ln in all_status.splitlines() if ln[3:].strip().strip('"') not in included]
+    if diff.startswith("ERROR"):
+        return diff
+    new_files = [p for code, p in plan_entries if code == "??"]
+    previews = [_new_file_preview(Path(target), p) for p in new_files]
+    if previews:
+        diff = "\n".join(part for part in [diff, *previews] if part)
 
     print(f"\n--- Proposed commit in {target} ---")
     print(f"Message: {message}")
     print("\nFiles this plan wrote, which WILL be committed (and nothing else):")
-    print(status)
+    print("\n".join(f"{code} {p}" for code, p in plan_entries))
     if diff:
         print("\nDiff:")
         print(diff[:MAX_DIFF_PREVIEW] + ("\n... [diff truncated]" if len(diff) > MAX_DIFF_PREVIEW else ""))
-    if excluded:
+    if excluded_entries:
         print("\nOther files in the project, NOT part of this commit:")
-        print("\n".join(excluded[:MAX_EXCLUDED_LISTED]))
-        if len(excluded) > MAX_EXCLUDED_LISTED:
-            print(f"... and {len(excluded) - MAX_EXCLUDED_LISTED} more")
+        print("\n".join(f"{code} {p}" for code, p in excluded_entries[:MAX_EXCLUDED_LISTED]))
+        if len(excluded_entries) > MAX_EXCLUDED_LISTED:
+            print(f"... and {len(excluded_entries) - MAX_EXCLUDED_LISTED} more")
     print("---")
 
     confirmed = auto_confirm if auto_confirm is not None else _confirm("Commit these files?")

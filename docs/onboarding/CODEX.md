@@ -118,7 +118,7 @@ the fix in words. **Report, do not rewrite.** An honest "I checked X, Y, Z and f
 Claude writes it in this shape, and your report mirrors it:
 1. **Goal** (one sentence)  2. **Branch** and the **files you may edit**  3. **Contract**
 4. **Acceptance** (tests that must pass)  5. **Out of scope**  6. **Report back** (branch, commit hash,
-test count and platform, anything unsure)
+**pushed to origin: yes/no**, test count and platform, anything unsure)
 
 Start every session with this line: *"Read `AGENTS.md` and `docs/onboarding/CODEX.md`. Tell me the seven
 invariants and which files you may edit for this task, then begin."* If it cannot state them, it has not read them.
