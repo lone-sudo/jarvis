@@ -44,6 +44,14 @@ Rules that follow:
   the fix in words.
 - **Reviewers reproduce before claiming.** Back a finding with a run, or label it "not reproduced".
 
+## How we work (cost and coordination, decided by Lone 2026-10-11)
+- **Antigravity** is the standing reviewer and test engineer. Its review is how a change gets a second pair of eyes.
+- **Codex** gets only tasks that are truly bounded: named files, a written contract, tests that say when it is done.
+- **Gemini** is called only for a security audit at a milestone, and is given the actual code (a bundle), never a description.
+- **One message per tool per milestone.** Batch everything a tool needs (all reviews, all tasks) into a single message. Do not drip-feed.
+- **Every report-back says "pushed to origin: yes/no".** An unpushed commit cannot be reviewed.
+- Changes by the author of a file are reviewed by another model before Lone merges, including fixes Claude makes to its own files.
+
 ## Branches and merging
 - `main` is protected and fast-forward only, after the full test suite passes. Only Lone merges.
 - One feature branch per stream, named `feature/<owner>-<milestone>-<topic>`, cut from the current
