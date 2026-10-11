@@ -880,7 +880,15 @@ def test_new_file_preview_does_not_read_through_a_symlinked_parent_directory(env
     try:
         (env.repo / "junc").symlink_to(outside, target_is_directory=True)
     except (OSError, NotImplementedError):
-        pytest.skip("symlinks need Developer Mode on Windows")
+        # Windows without Developer Mode: a directory junction needs neither admin rights nor
+        # Developer Mode, and is the real-world way a folder inside a project can point outside it.
+        import os
+        import subprocess
+        made = os.name == "nt" and subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(env.repo / "junc"), str(outside)], capture_output=True
+        ).returncode == 0
+        if not made:
+            pytest.skip("cannot create a symlink or junction here")
 
     text = _new_file_preview(env.repo, "junc/secret.txt")
 
