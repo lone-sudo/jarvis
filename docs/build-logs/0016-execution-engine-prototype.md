@@ -40,6 +40,22 @@ None of these lose data. What a plan commits was always exactly its own files (e
 
 10 regression tests added; 8 fail on the old code (mutation-checked). The other two guard behaviour that must not change: no content read through a symlink, and "Nothing to roll back" when no plan is stuck. Sandbox: 384 passed on the fix branch, 393 combined with Antigravity's 9 integration tests (`c013597`). **Not yet run on the ZBook.**
 
+## Gemini security audit of M002 and Antigravity's review of 854ab89 (2026-10-11)
+Every finding below was reproduced before it was rated or fixed. Gemini labelled all of its findings "not reproduced"; I re-rated two of them lower.
+| Finding | Source | Rating | Status |
+|---|---|---|---|
+| Repo config runs code during `git status` / `git diff` (`core.fsmonitor`, diff `textconv` drivers, hooks such as `post-index-change`). Gemini's suggested flags would have closed only two of the three. | Gemini | Medium (Gemini: High; `git clone` does not copy config or hooks, so it needs a folder with a hostile `.git`) | Task 004 (Codex), `tools/git.py` |
+| Symlink swapped under a write while its `[y/N]` is open | Gemini | Low (Gemini: High; needs workspace write access you already have) | Task 004 (Codex), `tools/fs.py` |
+| Rollback destroys an edit made while its `[y/N]` was open | Gemini | Medium | **Fixed**, `231e55b`; the preview is re-taken just before `reset --hard` and the rollback refuses if it differs |
+| Parent environment (API keys) inherited by the pytest subprocess and echoed into saved evidence | Gemini | Low-Medium | Task 005 (Antigravity), allow-listed environment |
+| Timed-out pytest leaves its child processes running (reproduced on Linux; Windows not yet tested) | Gemini | Low-Medium | Task 005 (Antigravity), kill the process tree |
+| `GitInspector._run` decodes git output with the locale codec (cp1252 on the ZBook): non-ASCII file names mangle the commit preview, and a name containing byte 0x9d (for example a curly quote) crashes it. My `core.quotepath=off` exposed it, but any diff containing such a byte is affected. | Antigravity | Medium (Antigravity: High) | Task 004 addendum (Codex), `tools/git.py` |
+| `git status` C-quoted names with a quote or tab were mis-parsed | Antigravity | Low | **Fixed**: `--porcelain=v2 -z` |
+| `_new_file_preview` read through a symlinked parent or junction | Antigravity | Low (a plan cannot reach it; the engine blocks the write) | **Fixed**: whole path resolved and kept inside the project |
+| `_new_file_preview` read the whole file; printing an unencodable character crashed on a cp1252 pipe | Antigravity | Low | **Fixed**: bounded read; `main()` makes console output replace unencodable characters |
+
+Open decision, left at the safe default: a plan's `git_commit` still runs the repository's own hooks (for example `pre-commit`). Their code is not shown at the `[y/N]`. Documented rather than blocked, because hooks are normally wanted in your own repositories.
+
 ## Verified on the real ZBook (Windows 11, Python 3.14, 2026-10-09)
 - `pytest tests/`: **316 passed, 2 skipped**. The 2 skips are the symlink tests (`test_engine_core.py`, `test_path_boundary.py`), which Windows skips without Developer Mode or admin rights; 316 + 2 = 318.
 - Read-only plan (`list_directory` + `read_file`): `plan-create`, `plan-run`, `plan-show` all behaved as designed, plan `COMPLETED 2/2`, no checkpoint (correct for read-only).
