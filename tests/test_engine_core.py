@@ -788,3 +788,37 @@ def test_rollback_with_nothing_to_do_and_no_stuck_plan_still_says_so(env):
 
     msg = cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lambda *_: None)
     assert msg.startswith("Nothing to roll back")
+
+
+# ------------------------------------------- Gemini security audit (milestone M002)
+
+def test_rollback_refuses_if_the_repository_changed_while_the_prompt_was_open(env, monkeypatch):
+    # Gemini finding 3 (reproduced): an edit made in another window while the [y/N] was open
+    # was destroyed by `reset --hard` without ever appearing in the preview.
+    from jarvis.core import checkpoint as cp
+
+    (env.repo / "b.txt").write_text("b original\n")
+    git(env.repo, "add", "b.txt"); git(env.repo, "commit", "-m", "add b")
+    plan = make_plan(env, [write("a.txt", "v2\n", verify={"type": "fail"})])
+    blocked = make_engine(env).run(plan.plan_id)
+    assert blocked.status is PlanStatus.BLOCKED
+
+    def confirm_after_an_edit_elsewhere(_prompt):
+        (env.repo / "b.txt").write_text("PRECIOUS EDIT made while the prompt was open\n")
+        return True
+
+    monkeypatch.setattr(cp, "_confirm", confirm_after_an_edit_elsewhere)
+
+    with pytest.raises(cp.CheckpointError, match="changed while you were deciding"):
+        cp.rollback(env.tracker, blocked.checkpoint_id, out=lambda *_: None)
+
+    assert (env.repo / "b.txt").read_text() == "PRECIOUS EDIT made while the prompt was open\n"
+    assert (env.repo / "a.txt").read_text() == "v2\n"                       # nothing was reset
+    assert env.store.load(plan.plan_id).status is PlanStatus.BLOCKED       # and the plan is untouched
+
+    # Running it again shows the new, honest preview, and then proceeds.
+    lines = []
+    cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lines.append)
+    assert "b.txt" in "\n".join(lines)
+    assert (env.repo / "b.txt").read_text() == "b original\n"
+    assert env.store.load(plan.plan_id).status is PlanStatus.PENDING

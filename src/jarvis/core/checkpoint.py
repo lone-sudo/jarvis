@@ -48,6 +48,21 @@ def _git(target: Path, *args: str) -> str:
     return out
 
 
+def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, str]:
+    """
+    Everything the rollback preview is built from, in one tuple, so it can be taken
+    twice (at preview time and again just before `reset --hard`) and compared.
+    (commits to drop, tracked-change summary, untracked files, files reset will delete, HEAD)
+    """
+    dropped = _git(target, "log", "--oneline", f"{commit}..HEAD")
+    changes = _git(target, "diff", "--stat", commit)
+    untracked = _git(target, "ls-files", "--others", "--exclude-standard")
+    # Tracked now, absent from the checkpoint commit: reset --hard will delete these from disk.
+    deleted = _git(target, "diff", "--name-only", "--diff-filter=A", commit)
+    head = _git(target, "rev-parse", "HEAD")
+    return dropped, changes, untracked, deleted, head
+
+
 def _git_target(tool_name: str, tier: ActionTier, project_root: str) -> Path:
     target, error = GitInspector._authorized_target(tool_name, tier, project_root, require_git_repo=True)
     if error:
@@ -139,11 +154,8 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
             f"Switch back first (git checkout {cp['git_branch'] or commit})."
         )
 
-    dropped = _git(target, "log", "--oneline", f"{commit}..HEAD")
-    changes = _git(target, "diff", "--stat", commit)
-    untracked = _git(target, "ls-files", "--others", "--exclude-standard")
-    # Tracked now, absent from the checkpoint commit: reset --hard will delete these from disk.
-    deleted = _git(target, "diff", "--name-only", "--diff-filter=A", commit)
+    snapshot = _rollback_snapshot(target, commit)
+    dropped, changes, untracked, deleted, _head = snapshot
 
     store = PlanStore(tracker.db_path)
     linked = [p for p in store.list_for_task(cp["task_id"]) if p.checkpoint_id == checkpoint_id]
@@ -208,6 +220,21 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
             input_payload=f"checkpoint={checkpoint_id}", output_payload="declined by user",
         )
         return "Rollback declined. Nothing was changed."
+
+    # The preview above is only honest if nothing changed while the prompt was open. An edit
+    # made in another window during that time would otherwise be destroyed without ever having
+    # been listed. Compare again immediately before the destructive step; refuse if different.
+    if _rollback_snapshot(target, commit) != snapshot:
+        tracker.log_execution(
+            cp["task_id"], "git_rollback", "SAFE_WRITE", "FAILURE",
+            input_payload=f"checkpoint={checkpoint_id}",
+            output_payload="repository changed while waiting for confirmation; nothing was changed",
+        )
+        raise CheckpointError(
+            "The repository changed while you were deciding (a file was edited, or a commit or "
+            "branch change happened), so the preview you confirmed is out of date. Nothing was "
+            f"changed. Run `jarvis rollback --checkpoint {checkpoint_id}` again to see the new preview."
+        )
 
     try:
         _git(target, "reset", "--hard", commit)
