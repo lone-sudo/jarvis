@@ -38,7 +38,7 @@ None of these lose data. What a plan commits was always exactly its own files (e
 4. **No preview for a new file (Low).** `git diff` is empty for untracked files, so the prompt showed no content. A preview is now built from the file itself (symlinks are not followed).
 5. **State-only rollback (Medium).** A plan that only created untracked files and then failed could not be rolled back: rollback said "Nothing to roll back" and left the plan `BLOCKED`. It now previews, asks `[y/N]`, resets the plan, and states that the untracked files remain on disk.
 
-10 regression tests added; 9 fail on the old code (the tenth, a symlink check, guards the new preview). Sandbox: 384 passed on the fix branch, 393 combined with Antigravity's 9 integration tests (`c013597`). **Not yet run on the ZBook.**
+10 regression tests added; 8 fail on the old code (mutation-checked). The other two guard behaviour that must not change: no content read through a symlink, and "Nothing to roll back" when no plan is stuck. Sandbox: 384 passed on the fix branch, 393 combined with Antigravity's 9 integration tests (`c013597`). **Not yet run on the ZBook.**
 
 ## Verified on the real ZBook (Windows 11, Python 3.14, 2026-10-09)
 - `pytest tests/`: **316 passed, 2 skipped**. The 2 skips are the symlink tests (`test_engine_core.py`, `test_path_boundary.py`), which Windows skips without Developer Mode or admin rights; 316 + 2 = 318.
