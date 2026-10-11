@@ -78,7 +78,7 @@ When Claude writes a task for Antigravity or Codex, it uses this shape and nothi
 3. **Contract**: the interface to implement, or a link to the ADR section.
 4. **Acceptance**: the tests that must pass, plus the behaviours to be added as new tests.
 5. **Out of scope**: what not to touch.
-6. **Report back**: branch, commit hash, test count and platform, and anything you were unsure about.
+6. **Report back**: branch, commit hash, **pushed to origin: yes/no**, test count and platform, and anything you were unsure about.
 
 ## Current state and where to look
 - Architecture decisions: `docs/adrs/` (ADR-0005 is the execution engine and its verifier contract).
