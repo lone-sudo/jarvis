@@ -15,6 +15,9 @@ continuity and tool execution. AI models are replaceable reasoning backends, nev
 2. **Workspace containment.** All file operations go through `SecurityPolicy.resolve_safe_path()`,
    contained to `JARVIS_WORKSPACE_ROOT`. Path traversal is blocked (ADR-0003).
 3. **Confirmed mutations.** `write-file` and `git-commit` show a diff and need an interactive `[y/N]`.
+   Any new command that writes a file must call `FileSystemInspector.write_file`. It must never write
+   with `Path.write_text`, `open(..., "w")` or similar, even for an export or a log, and even when the
+   path has already passed `resolve_safe_path()`.
 4. **Dual storage (ADR-0001).** SQLite for machine state; Markdown for human-readable project memory.
 5. **Real-machine verification.** Sandbox-verified is not real-machine-verified. Nothing is "done"
    until Lone has run it on his HP ZBook (Windows 11). Say which of the two you did.
@@ -69,6 +72,9 @@ Rules that follow:
 - Tests must be platform-independent. Do not hardcode `C:/` paths or rely on Windows-only path semantics.
 
 ## Safety lessons already paid for (do not relearn them)
+- A new command that wrote its output file directly passed the workspace boundary check but skipped the
+  diff and `[y/N]`, and could overwrite a file silently. Two independent runs of a trial task both did
+  this (2026-10-11, build log 0018). Containment is not confirmation: use `write_file`.
 - A write can stay inside the workspace yet escape its project and become impossible to roll back.
   Mutating steps are confined to the task's project directory (ADR-0005 b).
 - A plan's `verify` spec runs outside the four-tool allowlist, so it must be validated like a tool.
