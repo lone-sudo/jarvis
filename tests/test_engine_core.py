@@ -1294,3 +1294,104 @@ def test_rollback_moves_a_head_that_was_rewound_to_an_ancestor(env):
     cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lines.append)
     assert git(env.repo, "rev-parse", "HEAD") == checkpoint
     assert any("HEAD is at" in line for line in lines)
+
+
+# --- Antigravity's second look (digest review 2): git walks through a Windows junction -------------
+
+def _track_folder(env, name="sub"):
+    (env.repo / name).mkdir()
+    (env.repo / name / "f.txt").write_text("inside\n")
+    git(env.repo, "add", "-A")
+    git(env.repo, "commit", "-m", f"track {name}")
+    return git(env.repo, "rev-parse", "HEAD")
+
+
+def _replace_folder_with_symlink(env, tmp_path, name="sub"):
+    import os
+    import shutil
+
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "f.txt").write_text("inside\n")
+    shutil.rmtree(env.repo / name)
+    try:
+        os.symlink(outside, env.repo / name, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("cannot create a directory link here")
+    return outside
+
+
+def test_snapshot_refuses_when_a_tracked_folder_has_become_a_link(env, tmp_path):
+    from jarvis.core import checkpoint as cp
+
+    base = _track_folder(env)
+    _replace_folder_with_symlink(env, tmp_path)
+    with pytest.raises(cp.CheckpointError, match="tracked folder 'sub' is now a link or junction"):
+        cp._rollback_snapshot(env.repo, base)
+
+
+def test_snapshot_refuses_a_junction_even_though_is_symlink_is_false(env, monkeypatch):
+    # Windows reports a junction as is_junction() and NOT is_symlink(). Simulated with a real folder.
+    from pathlib import Path
+    from jarvis.core import checkpoint as cp
+
+    base = _track_folder(env)
+    real = getattr(Path, "is_junction", lambda self: False)
+    monkeypatch.setattr(Path, "is_junction", lambda self: self.name == "sub" or real(self), raising=False)
+    with pytest.raises(cp.CheckpointError, match="tracked folder 'sub'"):
+        cp._rollback_snapshot(env.repo, base)
+
+
+def test_snapshot_refuses_a_linked_nested_folder_and_one_with_a_leading_space(env, tmp_path):
+    from jarvis.core import checkpoint as cp
+
+    (env.repo / " lead" / "deep").mkdir(parents=True)
+    (env.repo / " lead" / "deep" / "f.txt").write_text("inside\n")
+    git(env.repo, "add", "-A")
+    git(env.repo, "commit", "-m", "nested, leading space")
+    base = git(env.repo, "rev-parse", "HEAD")
+    import os
+    import shutil
+
+    outside = tmp_path / "outside-nested"
+    outside.mkdir()
+    shutil.rmtree(env.repo / " lead" / "deep")
+    try:
+        os.symlink(outside, env.repo / " lead" / "deep", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("cannot create a directory link here")
+    with pytest.raises(cp.CheckpointError, match="lead/deep"):
+        cp._rollback_snapshot(env.repo, base)
+
+
+def test_rollback_refuses_before_any_preview_and_changes_nothing_through_a_linked_folder(env, tmp_path):
+    from jarvis.core import checkpoint as cp
+
+    _track_folder(env)
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+    outside = _replace_folder_with_symlink(env, tmp_path)
+    (outside / "f.txt").write_text("precious outside\n")
+    head = git(env.repo, "rev-parse", "HEAD")
+
+    lines = []
+    with pytest.raises(cp.CheckpointError, match="Refusing to roll back"):
+        cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lines.append)
+    assert lines == []                                              # no preview was shown
+    assert git(env.repo, "rev-parse", "HEAD") == head
+    assert (outside / "f.txt").read_text() == "precious outside\n"  # nothing written through the link
+    assert env.store.load(plan.plan_id).status is PlanStatus.BLOCKED
+
+
+def test_an_untracked_link_does_not_stop_a_rollback(env, tmp_path):
+    # Only TRACKED folders matter: git does not walk an untracked link, and plans may leave one.
+    import os
+    from jarvis.core import checkpoint as cp
+
+    base = git(env.repo, "rev-parse", "HEAD")
+    outside = tmp_path / "somewhere"
+    outside.mkdir()
+    try:
+        os.symlink(outside, env.repo / "scratch-link", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("cannot create a directory link here")
+    assert cp._rollback_snapshot(env.repo, base)
