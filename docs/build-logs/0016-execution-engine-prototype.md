@@ -121,3 +121,15 @@ Codex Task 007 also landed: the marker tests and the symlink-or-junction retarge
 - No concurrency guard between two simultaneous `plan-run` processes.
 - No `task-done` command: a completed plan leaves its task `IN_PROGRESS` (ADR-0005 e).
 - Pushed to `origin/feature/claude-m002-engine` once GitHub write access was granted to the Claude app. `main` is untouched; Lone holds merge authority.
+
+## M002 closed (2026-10-12, `main` at `41cc491`)
+- **Final real-machine run (ZBook, Windows 11, Python 3.14, clean `TEMP`/`TMP`):** `452 passed, 10 skipped, 0 failed` (462 total). Everything below is merged to `main`: the engine, checkpoint and rollback; Codex's git and file hardening (Task 004) and its Windows-runnable tests (Task 007); Antigravity's verifier hardening, process-tree tests and zombie fix (Tasks 005 and 006); and two rounds of Antigravity's digest review with real `mklink /J` junctions.
+- **The 10 skips, all expected:** 7 need symlink creation, which Windows denies without Developer Mode (their real-junction counterparts ran and passed); 1 is the exec bit, which Windows lacks; 1 is file names with `"`, backslash and tab, which Windows forbids; 1 is the workspace-escape symlink test in `test_path_boundary.py`. That last one is the only skip that covers an invariant (containment) and has never run on the ZBook. Enabling Developer Mode would run it.
+- **Review record:** every finding from every reviewer was reproduced before it was rated or fixed. Severities fell from High to Medium to Low across the rounds, no finding lost data, and the one defect the sandbox could not show (my F3 fix, a false "repository changed") was caught only by running on the ZBook.
+- **Known and accepted, not fixed:**
+  - A plan's `git_commit` still runs the repository's own hooks (documented in the earlier decision), and has the same junction exposure as the rollback path if a tracked folder is a junction. A plan cannot create a junction itself.
+  - `GitInspector._run` strips leading whitespace from its output (Codex's file). Nothing in the engine now depends on it, but any new caller that parses `-z` output must not.
+  - No concurrency guard between two simultaneous `plan-run` processes.
+  - No `task-done` command: a completed plan leaves its task `IN_PROGRESS` (ADR-0005 e).
+  - The rollback preview's "Files that will be DELETED from disk" section has an automated test but has never been seen in a manual ZBook run.
+- **Lessons that outlived the milestone:** (1) a "did it change?" check must be tested for stability on an untouched repo under realistic state (CRLF, racy index) as well as for sensitivity; (2) when git's own view is what is unsafe (junctions), no digest can fix it, so refuse before asking git; (3) a task spec must name only helpers that exist: my Task 007 named two that did not, and Codex correctly stopped instead of guessing.
