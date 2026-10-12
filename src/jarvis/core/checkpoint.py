@@ -50,10 +50,69 @@ def _git(target: Path, *args: str) -> str:
     return out
 
 
+def _diff_records(target: Path, commit: str, *extra: str) -> list[tuple[str, str]]:
+    """
+    `git diff --raw -z` as (metadata, path) pairs. Parsing the raw format rather than `--name-only`
+    matters twice over: every record starts with ':' so GitInspector._run's `.strip()` can never eat
+    the first file name's leading spaces (review of 524e588, F3), and it carries the file modes
+    without ever serialising file content (a 350 MiB binary made `diff --binary` time out, F4).
+    """
+    out = _git(target, "diff", "--raw", "--no-abbrev", "--no-renames", "-z", *extra)
+    tokens = out.split("\0")
+    records: list[tuple[str, str]] = []
+    i = 0
+    while i + 1 < len(tokens):
+        if tokens[i].startswith(":"):
+            records.append((tokens[i], tokens[i + 1]))
+            i += 2
+        else:
+            i += 1
+    return records
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or a Windows directory junction (which `is_symlink()` reports as False)."""
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def _link_marker(path: Path) -> bytes:
+    try:
+        return os.readlink(path).encode("utf-8", errors="replace")
+    except OSError:
+        return b"?"
+
+
+def _hash_one_path(digest, target: Path, name: str) -> None:
+    path = target / name
+    # Never read THROUGH a link. If any parent directory of the file is a link (a junction swapped in
+    # for `sub/`), opening `sub/f.txt` would read a file outside the project: hash where the link
+    # points instead and do not open anything (review of 524e588, F1a).
+    parent = target
+    for part in Path(name).parts[:-1]:
+        parent = parent / part
+        if _is_link(parent):
+            digest.update(b"X" + _link_marker(parent))
+            return
+    try:
+        if _is_link(path):                      # a link at the path itself: hash where it points
+            digest.update(b"L" + _link_marker(path))
+        elif path.is_file():
+            digest.update(b"F")
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+        elif path.is_dir():
+            digest.update(b"D")                 # a directory where a file used to be (F1b)
+        else:
+            digest.update(b"M")                 # missing, or not a regular file
+    except OSError as e:
+        digest.update(b"E" + str(e.errno).encode())
+
+
 def _raw_content_digest(target: Path, commit: str) -> str:
     """
-    SHA-256 over the RAW BYTES on disk of every tracked file that differs from the checkpoint (in
-    the working tree or the index), which are the files `reset --hard` can overwrite.
+    SHA-256 over the RAW BYTES on disk of every tracked file `reset --hard` can overwrite: the files
+    that differ from the checkpoint in the working tree, in the index, or in HEAD.
 
     Why not let git do it: with core.autocrlf=true git normalises CRLF to LF before diffing, so an
     edit that only changes line endings is invisible to `git diff` (Task 006 review, F3). Forcing
@@ -61,29 +120,37 @@ def _raw_content_digest(target: Path, commit: str) -> str:
     index entry is "racy": git trusts the index blob while the entry is stat-clean and reads the
     working tree otherwise, and an ordinary `git status` flips that between two snapshots, which
     produced a false "repository changed" on the ZBook. Reading the bytes ourselves is immune to both.
+
+    HEAD is included because a step may have committed to a file and the user then staged it back to
+    the checkpoint's content: neither the working tree nor the index differs from the checkpoint,
+    yet `reset --hard` still rewrites the file (review of 524e588, F2).
     """
     names: set[str] = set()
-    for flag in ([], ["--cached"]):
-        out = _git(target, "diff", *flag, "--name-only", "-z", commit)
-        names.update(n for n in out.split("\0") if n)
+    for extra in ((commit,), ("--cached", commit), (commit, "HEAD")):
+        names.update(path for _, path in _diff_records(target, commit, *extra))
     digest = hashlib.sha256()
     for name in sorted(names):
-        path = target / name
         digest.update(name.encode("utf-8", errors="replace") + b"\0")
-        try:
-            if path.is_symlink():                      # never follow a link: hash where it points
-                digest.update(b"L" + os.readlink(path).encode("utf-8", errors="replace"))
-            elif path.is_file():
-                digest.update(b"F")
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1 << 20), b""):
-                        digest.update(chunk)
-            else:
-                digest.update(b"M")                    # missing, or not a regular file
-        except OSError as e:
-            digest.update(b"E" + str(e.errno).encode())
+        _hash_one_path(digest, target, name)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _tracked_state_digest(target: Path, commit: str) -> str:
+    """
+    A digest of git's own view, WITHOUT any file content: which paths differ from the checkpoint, how
+    (status letter and modes, so an exec-bit change shows) and, for the index, which blob is staged.
+    The working-tree blob id is deliberately left out: git fills it in only when the index entry is
+    stat-clean, which is the same racy-index flip as above.
+    """
+    lines = []
+    for meta, path in _diff_records(target, commit, commit):
+        fields = meta.split()                       # :oldmode newmode oldsha newsha status
+        lines.append(f"W {fields[0]} {fields[1]} {fields[4]} {path}")
+    for meta, path in _diff_records(target, commit, "--cached", commit):
+        fields = meta.split()
+        lines.append(f"I {fields[0]} {fields[1]} {fields[3]} {fields[4]} {path}")
+    return hashlib.sha256("\n".join(sorted(lines)).encode("utf-8", errors="replace")).hexdigest()
 
 
 def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, str, str, str, str]:
@@ -94,9 +161,9 @@ def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, s
      HEAD, branch, digest of the exact tracked content, index/worktree status)
 
     The summary (`--stat`) is for humans and only counts lines, so an edit that keeps the
-    line counts equal looks identical (Antigravity, Task 005 F1). The digest of
-    `diff --binary` changes on any byte difference between the working tree and the
-    checkpoint. The branch name matters because `reset --hard` moves whichever branch is
+    line counts equal looks identical (Antigravity, Task 005 F1). The digest changes on any
+    byte difference between the working tree and the checkpoint, any mode or staged-blob
+    difference, and never serialises file content through git (review of 524e588, F4). The branch name matters because `reset --hard` moves whichever branch is
     checked out now, even when HEAD is the same commit (F2).
     """
     dropped = _git(target, "log", "--oneline", f"{commit}..HEAD")
@@ -112,11 +179,7 @@ def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, s
     deleted = _git(target, "diff", "--name-only", "--diff-filter=A", commit)
     head = _git(target, "rev-parse", "HEAD")
     branch = _git(target, "branch", "--show-current")
-    full_diff = _git(target, "diff", "--binary", commit)
-    digest = (
-        hashlib.sha256(full_diff.encode("utf-8", errors="replace")).hexdigest()
-        + ":" + _raw_content_digest(target, commit)
-    )
+    digest = _tracked_state_digest(target, commit) + ":" + _raw_content_digest(target, commit)
     status = _git(target, "status", "--porcelain=v2", "-z", "--untracked-files=no")
     return dropped, changes, untracked, deleted, head, branch, digest, status
 
@@ -247,7 +310,9 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
     store = PlanStore(tracker.db_path)
     linked = [p for p in store.list_for_task(cp["task_id"]) if p.checkpoint_id == checkpoint_id]
 
-    if not dropped and not changes:
+    if not dropped and not changes and snapshot[4] == commit:
+        # (HEAD must BE the checkpoint: a HEAD rewound to an ancestor while the index and working
+        # tree still match it has no commits to drop and no changes, yet still needs moving; F5.)
         # A plan that only created untracked files before failing leaves nothing for git to
         # undo, but it is still BLOCKED. Rolling back must let it be re-run from the start,
         # and must say plainly that the files it created are still on disk.
@@ -288,6 +353,8 @@ def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, o
     if dropped:
         out("Commits that will be removed from the branch (still recoverable via git reflog):")
         out(dropped)
+    if snapshot[4] != commit and not dropped:
+        out(f"HEAD is at {snapshot[4][:10]}, not at the checkpoint; it will be moved to {commit[:10]}.")
     if deleted:
         out("Files that will be DELETED from disk (they did not exist at the checkpoint):")
         out(deleted)
