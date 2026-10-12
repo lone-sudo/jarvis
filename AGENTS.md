@@ -82,8 +82,9 @@ Rules that follow:
 - A plan's `verify` spec runs outside the four-tool allowlist, so it must be validated like a tool.
   Unrestricted pytest `args` could delete directories (`--basetemp`) or write files outside the project
   (`--junitxml`). Pytest args are allow-listed; absolute paths are rejected.
-- `tools/base.py::run_logged` labels any output containing "denied by policy" as a rejection, even a
-  successful read of a document that quotes the phrase. Known issue, not yet fixed.
+- `tools/base.py::run_logged` once labelled any output containing "denied by policy" as a rejection,
+  even a successful read of a document that quotes the phrase. Fixed in `9fcd303`: only a result that
+  starts with `ERROR:` is classified, so classify tool results by prefix, never by a phrase in the body.
 - Tools report errors as strings starting `ERROR:`. A check that treats a git error as "no output"
   fails open. Fail closed on any `ERROR:`.
 
