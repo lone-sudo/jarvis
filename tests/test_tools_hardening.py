@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,29 @@ import pytest
 from jarvis.tools import fs as fs_module
 from jarvis.tools.fs import FileSystemInspector
 from jarvis.tools.git import GitInspector
+
+
+def _make_dir_link(link: Path, target: Path) -> bool:
+    """Directory link: a symlink if allowed, else a Windows junction (no admin needed)."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True
+        )
+        return made.returncode == 0
+    return False
+
+
+def _remove_dir_link(link: Path) -> None:
+    """Remove a symlink or junction WITHOUT touching what it points at."""
+    try:
+        link.unlink()
+    except (IsADirectoryError, PermissionError, OSError):
+        os.rmdir(link)
 
 
 @pytest.fixture(autouse=True)
@@ -80,33 +104,34 @@ def _init_repo(path: Path):
     subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=path, check=True)
 
 
-def _marker_script(path: Path, marker: Path):
-    path.write_text(f"#!/bin/sh\nprintf ran > '{marker}'\n", encoding="utf-8")
-    path.chmod(0o755)
+def _marker_command(marker: Path) -> str:
+    # Git parses its config command string into argv; quote the executable and
+    # Python snippet for that parser. Forward slashes keep Git for Windows
+    # from treating backslashes in paths as escapes.
+    executable = Path(sys.executable).as_posix()
+    marker_path = marker.as_posix()
+    code = f"from pathlib import Path; Path({marker_path!r}).touch()"
+    return f'"{executable}" -c "{code}"'
 
 
-@pytest.mark.skipif(os.name == "nt", reason="marker scripts require POSIX shell execution")
 def test_status_disables_configured_fsmonitor(tmp_path):
     repo = tmp_path / "fsmonitor-repo"
     marker = tmp_path / "fsmonitor-ran"
     _init_repo(repo)
-    script = tmp_path / "fsmonitor.sh"
-    _marker_script(script, marker)
-    subprocess.run(["git", "config", "core.fsmonitor", str(script)], cwd=repo, check=True)
+    command = _marker_command(marker)
+    subprocess.run(["git", "config", "core.fsmonitor", command], cwd=repo, check=True)
 
     result = GitInspector._run(["status", "--short"], repo)
     assert not result.startswith("ERROR:")
     assert not marker.exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="marker scripts require POSIX shell execution")
 def test_diff_disables_configured_textconv(tmp_path):
     repo = tmp_path / "textconv-repo"
     marker = tmp_path / "textconv-ran"
     _init_repo(repo)
-    script = tmp_path / "textconv.sh"
-    _marker_script(script, marker)
-    subprocess.run(["git", "config", "diff.marker.textconv", str(script)], cwd=repo, check=True)
+    command = _marker_command(marker)
+    subprocess.run(["git", "config", "diff.marker.textconv", command], cwd=repo, check=True)
     (repo / ".gitattributes").write_text("*.txt diff=marker\n", encoding="utf-8")
     (repo / "file.txt").write_text("changed\n", encoding="utf-8")
 
@@ -115,15 +140,23 @@ def test_diff_disables_configured_textconv(tmp_path):
     assert not marker.exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="marker scripts require POSIX shell execution")
 def test_status_disables_configured_post_index_change_hook(tmp_path):
     repo = tmp_path / "hook-repo"
     hooks = tmp_path / "hooks"
     marker = tmp_path / "hook-ran"
     _init_repo(repo)
     hooks.mkdir()
-    _marker_script(hooks / "post-index-change", marker)
-    subprocess.run(["git", "config", "core.hooksPath", str(hooks)], cwd=repo, check=True)
+    hook = hooks / "post-index-change"
+    hook.write_text(
+        f"#!{Path(sys.executable).as_posix()}\n"
+        "from pathlib import Path\n"
+        f"Path({marker.as_posix()!r}).touch()\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    subprocess.run(["git", "config", "core.hooksPath", hooks.as_posix()], cwd=repo, check=True)
+    # Force status to refresh the index stat cache, which invokes this hook.
+    os.utime(repo / "file.txt", None)
 
     result = GitInspector._run(["status", "--short"], repo)
     assert not result.startswith("ERROR:")
@@ -137,21 +170,21 @@ def test_write_file_rejects_symlink_retarget_during_confirmation(tmp_path, monke
     first.mkdir(parents=True)
     second.mkdir()
     link = workspace / "link"
-    try:
-        link.symlink_to(first, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"symlink creation is unavailable: {exc}")
+    if not _make_dir_link(link, first):
+        pytest.skip("cannot create a symlink or junction here")
 
     def retarget(_prompt):
-        link.unlink()
-        try:
-            link.symlink_to(second, target_is_directory=True)
-        except OSError as exc:
-            pytest.skip(f"symlink creation is unavailable: {exc}")
+        _remove_dir_link(link)
+        if not _make_dir_link(link, second):
+            pytest.skip("cannot create a symlink or junction here")
         return True
 
     monkeypatch.setattr(fs_module, "_confirm", retarget)
-    result = FileSystemInspector.write_file("link/new.txt", "content")
-    assert result == "ERROR: Access denied by policy. Path changed while waiting for confirmation."
-    assert not (first / "new.txt").exists()
-    assert not (second / "new.txt").exists()
+    try:
+        result = FileSystemInspector.write_file("link/new.txt", "content")
+        assert result == "ERROR: Access denied by policy. Path changed while waiting for confirmation."
+        assert not (first / "new.txt").exists()
+        assert not (second / "new.txt").exists()
+    finally:
+        if link.exists() or link.is_symlink():
+            _remove_dir_link(link)
