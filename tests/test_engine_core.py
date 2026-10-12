@@ -1132,3 +1132,165 @@ def test_snapshot_does_not_change_when_only_the_index_stat_cache_is_refreshed(en
     first = cp._rollback_snapshot(env.repo, base)
     git(env.repo, "status")                                 # refreshes the stat cache, rewrites the index
     assert cp._rollback_snapshot(env.repo, base) == first
+
+
+# --- Antigravity's review of 524e588 (digest, Windows): F1-F5 ---------------------------------------
+
+def _commit_then_stage_back(env, first: bytes, second: bytes, name="a.txt"):
+    """Checkpoint = a commit holding `first`; HEAD then moves on to `second`. Returns the checkpoint."""
+    git(env.repo, "config", "core.autocrlf", "true")
+    (env.repo / name).write_bytes(first)
+    git(env.repo, "add", name)
+    git(env.repo, "commit", "--allow-empty", "-m", "checkpoint content")
+    base = git(env.repo, "rev-parse", "HEAD")
+    (env.repo / name).write_bytes(second)
+    git(env.repo, "commit", "-am", "a step committed")
+    return base
+
+
+def test_digest_sees_a_line_ending_edit_to_a_file_that_only_differs_in_head(env):
+    # F2: HEAD has v2, the index was staged back to the checkpoint's v1, and the working tree matches
+    # it too. Nothing differs from the checkpoint in the tree or the index, but `reset --hard` still
+    # rewrites the file, so an edit made during the prompt must change the digest.
+    from jarvis.core import checkpoint as cp
+
+    base = _commit_then_stage_back(env, b"v1\n", b"v2\n")
+    (env.repo / "a.txt").write_bytes(b"v1\r\n")
+    git(env.repo, "add", "a.txt")
+    first = cp._raw_content_digest(env.repo, base)
+    (env.repo / "a.txt").write_bytes(b"v1\n")
+    assert cp._raw_content_digest(env.repo, base) != first
+
+
+def test_digest_sees_an_edit_to_a_file_whose_name_starts_with_a_space(env):
+    # F3: GitInspector._run strips its output, which ate the leading space of the first name in a
+    # `--name-only -z` list, so the digest looked up a path that did not exist and hashed "missing".
+    from jarvis.core import checkpoint as cp
+
+    git(env.repo, "config", "core.autocrlf", "true")
+    (env.repo / " leading.txt").write_bytes(b"v1\n")
+    git(env.repo, "add", "-A")
+    git(env.repo, "commit", "-m", "leading space")
+    base = git(env.repo, "rev-parse", "HEAD")
+    (env.repo / " leading.txt").write_bytes(b"v2\r\n")
+    first = cp._rollback_snapshot(env.repo, base)
+    (env.repo / " leading.txt").write_bytes(b"v2\n")
+    assert cp._rollback_snapshot(env.repo, base) != first
+
+
+def test_digest_does_not_read_through_a_directory_link_into_the_outside(env, tmp_path):
+    # F1a: a tracked sub/ replaced by a link (a Windows junction in real life) must not be read
+    # through, or the snapshot would hash files outside the project (Invariant 2).
+    import os
+    from jarvis.core import checkpoint as cp
+
+    (env.repo / "sub").mkdir()
+    (env.repo / "sub" / "f.txt").write_text("inside\n")
+    git(env.repo, "add", "-A")
+    git(env.repo, "commit", "-m", "sub")
+    base = git(env.repo, "rev-parse", "HEAD")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f.txt").write_text("secret one\n")
+    (env.repo / "sub" / "f.txt").unlink()
+    (env.repo / "sub").rmdir()
+    try:
+        os.symlink(outside, env.repo / "sub", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("cannot create a directory link here")
+    first = cp._raw_content_digest(env.repo, base)
+    (outside / "f.txt").write_text("secret two, changed\n")
+    assert cp._raw_content_digest(env.repo, base) == first        # the outside file was never read
+
+
+def test_a_junction_is_hashed_by_its_target_and_retargeting_it_is_noticed(env, monkeypatch):
+    # F1b: Path.is_symlink() is False for a Windows junction, so it fell through to "not a regular
+    # file" and every junction looked the same. Simulated here: a plain directory standing in for the
+    # junction, with is_junction()/readlink() patched the way Windows reports them.
+    import os
+    from pathlib import Path
+    from jarvis.core import checkpoint as cp
+
+    base = git(env.repo, "rev-parse", "HEAD")
+    (env.repo / "a.txt").unlink()
+    (env.repo / "a.txt").mkdir()
+    target = {"value": "C:\\outside\\one"}
+    real_is_junction = getattr(Path, "is_junction", lambda self: False)
+    monkeypatch.setattr(Path, "is_junction",
+                        lambda self: self.name == "a.txt" or real_is_junction(self), raising=False)
+    monkeypatch.setattr(os, "readlink", lambda p: target["value"])
+    first = cp._raw_content_digest(env.repo, base)
+    target["value"] = "C:\\outside\\two"
+    assert cp._raw_content_digest(env.repo, base) != first
+
+
+def test_a_directory_in_place_of_a_file_is_not_the_same_as_a_missing_file(env):
+    from jarvis.core import checkpoint as cp
+
+    base = git(env.repo, "rev-parse", "HEAD")
+    (env.repo / "a.txt").unlink()
+    missing = cp._raw_content_digest(env.repo, base)
+    (env.repo / "a.txt").mkdir()
+    assert cp._raw_content_digest(env.repo, base) != missing
+
+
+def test_snapshot_never_asks_git_to_serialise_file_content(env, monkeypatch):
+    # F4: `git diff --binary` base85-encodes whole files into stdout; on a 350 MiB file it ran past
+    # the 15 s git timeout and the rollback was refused. The raw-bytes digest already covers content.
+    from jarvis.core import checkpoint as cp
+
+    calls = []
+    real = cp._git
+    monkeypatch.setattr(cp, "_git", lambda target, *a: (calls.append(a), real(target, *a))[1])
+    (env.repo / "a.txt").write_bytes(b"changed\n")
+    cp._rollback_snapshot(env.repo, git(env.repo, "rev-parse", "HEAD"))
+    assert calls and not any("--binary" in a or "--patch" in a or "-p" in a for a in calls)
+
+
+def test_snapshot_still_notices_a_mode_only_change_without_diff_binary(env):
+    import os
+    from jarvis.core import checkpoint as cp
+
+    if os.name == "nt":
+        pytest.skip("the exec bit is not a working-tree property on Windows")
+    base = git(env.repo, "rev-parse", "HEAD")
+    first = cp._rollback_snapshot(env.repo, base)
+    (env.repo / "a.txt").chmod(0o755)
+    assert cp._rollback_snapshot(env.repo, base) != first
+
+
+def test_snapshot_still_notices_a_different_blob_staged_over_the_same_working_tree(env):
+    from jarvis.core import checkpoint as cp
+
+    base = git(env.repo, "rev-parse", "HEAD")
+    (env.repo / "a.txt").write_bytes(b"staged one\n")
+    git(env.repo, "add", "a.txt")
+    first = cp._rollback_snapshot(env.repo, base)
+    (env.repo / "a.txt").write_bytes(b"staged two\n")
+    git(env.repo, "add", "a.txt")
+    (env.repo / "a.txt").write_bytes(b"staged one\n")             # working tree unchanged vs. first
+    assert cp._rollback_snapshot(env.repo, base) != first
+
+
+def test_rollback_moves_a_head_that_was_rewound_to_an_ancestor(env):
+    # F5: HEAD rewound to the checkpoint's parent while the index and working tree still match the
+    # checkpoint: no commits to drop and no changes, yet HEAD is on the wrong commit. The state-only
+    # shortcut must not be taken, or the plan is reset to PENDING with HEAD left behind.
+    from jarvis.core import checkpoint as cp
+
+    root = git(env.repo, "rev-parse", "HEAD")
+    (env.repo / "x.txt").write_text("x\n")
+    git(env.repo, "add", "x.txt")
+    git(env.repo, "commit", "-m", "the checkpoint commit")
+    checkpoint = git(env.repo, "rev-parse", "HEAD")
+    plan, blocked = _blocked_plan_with_edit_of_a(env)
+    git(env.repo, "checkout", "--", "a.txt")
+    git(env.repo, "reset", "--hard", root)
+    (env.repo / "x.txt").write_text("x\n")
+    git(env.repo, "add", "x.txt")
+    assert git(env.repo, "rev-parse", "HEAD") == root
+
+    lines = []
+    cp.rollback(env.tracker, blocked.checkpoint_id, auto_confirm=True, out=lines.append)
+    assert git(env.repo, "rev-parse", "HEAD") == checkpoint
+    assert any("HEAD is at" in line for line in lines)
