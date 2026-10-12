@@ -383,3 +383,138 @@ def test_state_only_rollback_fails_closed_and_logs_failure_on_recheck_git_error(
     assert env.store.load(plan.plan_id).status is PlanStatus.BLOCKED
     rows = _execution_rows(env)
     assert any(tool == "git_rollback" and status == "FAILURE" for tool, status, _ in rows)
+
+
+# ---------------------------------------------------------------------------
+# 8. Review 2 (2138fd5): Real Windows junctions (mklink /J) and _tracked_state_digest
+# ---------------------------------------------------------------------------
+
+def _make_dir_link(link_path: Path, target_dir: Path) -> None:
+    if os.name == "nt":
+        res = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_path), str(target_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0:
+            pytest.skip(f"mklink /J unavailable: {res.stderr.strip()}")
+    else:
+        try:
+            os.symlink(target_dir, link_path, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlink unavailable: {exc}")
+
+
+def _remove_dir_link(link_path: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "rmdir", str(link_path)], capture_output=True, check=True)
+    else:
+        link_path.unlink()
+
+
+def test_real_junction_retargeting_on_file_and_parent_folder_never_opens_outside(env, tmp_path, monkeypatch):
+    sub = env.repo / "sub"
+    sub.mkdir()
+    (sub / "f.txt").write_bytes(b"inside\n")
+    _git(env.repo, "add", "-A")
+    _git(env.repo, "commit", "-m", "add sub/f.txt")
+    commit = _git(env.repo, "rev-parse", "HEAD")
+
+    outside1 = tmp_path / "outside1"
+    outside1.mkdir()
+    (outside1 / "f.txt").write_bytes(b"secret_one\n")
+
+    outside2 = tmp_path / "outside2"
+    outside2.mkdir()
+    (outside2 / "f.txt").write_bytes(b"secret_two\n")
+
+    opened: list[Path] = []
+    real_open = Path.open
+
+    def spy_open(self: Path, mode="r", *args, **kwargs):
+        if "r" in mode:
+            opened.append(self)
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", spy_open)
+
+    # Part A: Junction replacing a tracked file (a.txt -> outside1, then retargeted -> outside2)
+    (env.repo / "a.txt").unlink()
+    _make_dir_link(env.repo / "a.txt", outside1)
+    snap_file_1 = cp._rollback_snapshot(env.repo, commit)
+
+    _remove_dir_link(env.repo / "a.txt")
+    _make_dir_link(env.repo / "a.txt", outside2)
+    snap_file_2 = cp._rollback_snapshot(env.repo, commit)
+
+    assert snap_file_1 != snap_file_2
+    assert snap_file_1[6] != snap_file_2[6]
+    assert opened == []
+
+    _remove_dir_link(env.repo / "a.txt")
+    (env.repo / "a.txt").write_bytes(b"v1\n")
+    opened.clear()
+
+    # Part B: Junction replacing a parent folder (sub -> outside1, then retargeted -> outside2)
+    (sub / "f.txt").unlink()
+    sub.rmdir()
+    _make_dir_link(sub, outside1)
+    snap_parent_1 = cp._rollback_snapshot(env.repo, commit)
+    raw_1 = cp._raw_content_digest(env.repo, commit)
+
+    # Mutating the outside file's bytes does not change _raw_content_digest because it is never opened
+    (outside1 / "f.txt").write_bytes(b"secret_one_mutated\n")
+    assert cp._raw_content_digest(env.repo, commit) == raw_1
+
+    _remove_dir_link(sub)
+    _make_dir_link(sub, outside2)
+    snap_parent_2 = cp._rollback_snapshot(env.repo, commit)
+
+    assert snap_parent_1 != snap_parent_2
+    assert snap_parent_1[6] != snap_parent_2[6]
+    assert opened == []
+    _remove_dir_link(sub)
+
+
+def test_tracked_state_digest_detects_mode_staged_blob_link_and_rename(env, tmp_path):
+    (env.repo / "b.txt").write_bytes(b"b_init\n")
+    _git(env.repo, "add", "b.txt")
+    _git(env.repo, "commit", "-m", "add b.txt")
+    commit = _git(env.repo, "rev-parse", "HEAD")
+
+    base_state = cp._tracked_state_digest(env.repo, commit)
+
+    # 1. Exec-bit change in index
+    _git(env.repo, "update-index", "--chmod=+x", "a.txt")
+    exec_state = cp._tracked_state_digest(env.repo, commit)
+    assert exec_state != base_state
+
+    # 2. Staged blob swap over identical working tree
+    (env.repo / "a.txt").write_bytes(b"staged_v1\n")
+    _git(env.repo, "add", "a.txt")
+    staged_1 = cp._tracked_state_digest(env.repo, commit)
+
+    (env.repo / "a.txt").write_bytes(b"staged_v2\n")
+    _git(env.repo, "add", "a.txt")
+    (env.repo / "a.txt").write_bytes(b"staged_v1\n")
+    staged_2 = cp._tracked_state_digest(env.repo, commit)
+    assert staged_1 != staged_2
+
+    # 3. File replaced by a link/junction
+    outside = tmp_path / "link_dest"
+    outside.mkdir()
+    snap_before_link = cp._rollback_snapshot(env.repo, commit)
+    (env.repo / "a.txt").unlink()
+    _make_dir_link(env.repo / "a.txt", outside)
+    snap_after_link = cp._rollback_snapshot(env.repo, commit)
+    assert snap_before_link[6] != snap_after_link[6]
+    _remove_dir_link(env.repo / "a.txt")
+    (env.repo / "a.txt").write_bytes(b"v1\n")
+    _git(env.repo, "add", "a.txt")
+
+    # 4. Rename (git mv)
+    state_before_mv = cp._tracked_state_digest(env.repo, commit)
+    _git(env.repo, "mv", "b.txt", "b_moved.txt")
+    state_after_mv = cp._tracked_state_digest(env.repo, commit)
+    assert state_before_mv != state_after_mv
+
