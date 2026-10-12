@@ -153,6 +153,33 @@ def _tracked_state_digest(target: Path, commit: str) -> str:
     return hashlib.sha256("\n".join(sorted(lines)).encode("utf-8", errors="replace")).hexdigest()
 
 
+def _refuse_if_tracked_folder_is_a_link(target: Path) -> None:
+    """
+    Git for Windows treats a directory junction as an ordinary directory and walks into it, so with a
+    tracked folder replaced by a junction `git diff` reads, and `git reset --hard` WRITES, files
+    outside the project (review 2 of the digest, F1: reproduced on the ZBook). A POSIX symlink is
+    safe because git records it as a link, not as a folder. Neither git's output nor our digest can
+    be trusted across such a folder, so refuse before running either. `ls-files --stage` is parsed
+    because every record starts with a digit: `_run` strips its output and would eat a leading space.
+    """
+    out = _git(target, "ls-files", "-z", "--stage")
+    folders: set[str] = set()
+    for record in out.split("\0"):
+        if "\t" not in record:
+            continue
+        parts = Path(record.split("\t", 1)[1]).parts[:-1]
+        for depth in range(1, len(parts) + 1):
+            folders.add("/".join(parts[:depth]))
+    for folder in sorted(folders):
+        if _is_link(target / folder):
+            raise CheckpointError(
+                f"Refusing to roll back: the tracked folder '{folder}' is now a link or junction. Git would "
+                "read and overwrite files through it, possibly outside the project. Nothing was changed. "
+                "Remove the link and restore the folder (git checkout -- " + folder + "), then run the "
+                "rollback again."
+            )
+
+
 def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, str, str, str, str]:
     """
     Everything the rollback preview is built from, in one tuple, so it can be taken
@@ -166,6 +193,7 @@ def _rollback_snapshot(target: Path, commit: str) -> tuple[str, str, str, str, s
     difference, and never serialises file content through git (review of 524e588, F4). The branch name matters because `reset --hard` moves whichever branch is
     checked out now, even when HEAD is the same commit (F2).
     """
+    _refuse_if_tracked_folder_is_a_link(target)    # before ANY diff: git would read through the link
     dropped = _git(target, "log", "--oneline", f"{commit}..HEAD")
     changes = _git(target, "diff", "--stat", commit)
     # `diff <commit>` compares the WORKING TREE with the checkpoint. The index can differ while
