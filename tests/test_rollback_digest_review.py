@@ -459,21 +459,53 @@ def test_real_junction_retargeting_on_file_and_parent_folder_never_opens_outside
     (sub / "f.txt").unlink()
     sub.rmdir()
     _make_dir_link(sub, outside1)
-    snap_parent_1 = cp._rollback_snapshot(env.repo, commit)
-    raw_1 = cp._raw_content_digest(env.repo, commit)
-
-    # Mutating the outside file's bytes does not change _raw_content_digest because it is never opened
-    (outside1 / "f.txt").write_bytes(b"secret_one_mutated\n")
-    assert cp._raw_content_digest(env.repo, commit) == raw_1
+    with pytest.raises(cp.CheckpointError, match="tracked folder 'sub'"):
+        cp._rollback_snapshot(env.repo, commit)
 
     _remove_dir_link(sub)
     _make_dir_link(sub, outside2)
-    snap_parent_2 = cp._rollback_snapshot(env.repo, commit)
+    with pytest.raises(cp.CheckpointError, match="tracked folder 'sub'"):
+        cp._rollback_snapshot(env.repo, commit)
 
-    assert snap_parent_1 != snap_parent_2
-    assert snap_parent_1[6] != snap_parent_2[6]
     assert opened == []
     _remove_dir_link(sub)
+
+
+def test_real_junction_on_tracked_folder_refuses_rollback_and_preserves_outside_file(env, tmp_path):
+    sub = env.repo / "sub"
+    sub.mkdir()
+    (sub / "f.txt").write_bytes(b"inside_v1\n")
+    _git(env.repo, "add", "-A")
+    _git(env.repo, "commit", "-m", "add sub/f.txt")
+
+    cp_id = cp.create_checkpoint(env.tracker, env.task_id, "proj", "before step")
+
+    # Advance HEAD with a change to sub/f.txt so reset --hard would overwrite sub/f.txt if reached
+    (sub / "f.txt").write_bytes(b"inside_v2\n")
+    _git(env.repo, "add", "-A")
+    _git(env.repo, "commit", "-m", "step edits sub/f.txt")
+    head_before = _git(env.repo, "rev-parse", "HEAD")
+
+    # Replace tracked folder 'sub' with a junction whose target holds a copy of the tracked file
+    outside = tmp_path / "outside_target"
+    outside.mkdir()
+    outside_bytes = b"inside_v1\n"
+    (outside / "f.txt").write_bytes(outside_bytes)
+
+    (sub / "f.txt").unlink()
+    sub.rmdir()
+    _make_dir_link(sub, outside)
+    try:
+        preview_lines: list[str] = []
+        with pytest.raises(cp.CheckpointError, match="tracked folder 'sub'"):
+            cp.rollback(env.tracker, cp_id, auto_confirm=True, out=preview_lines.append)
+
+        assert preview_lines == []
+        assert _git(env.repo, "rev-parse", "HEAD") == head_before
+        assert (outside / "f.txt").read_bytes() == outside_bytes
+    finally:
+        if sub.exists() or cp._is_link(sub):
+            _remove_dir_link(sub)
 
 
 def test_tracked_state_digest_detects_mode_staged_blob_link_and_rename(env, tmp_path):
@@ -517,4 +549,5 @@ def test_tracked_state_digest_detects_mode_staged_blob_link_and_rename(env, tmp_
     _git(env.repo, "mv", "b.txt", "b_moved.txt")
     state_after_mv = cp._tracked_state_digest(env.repo, commit)
     assert state_before_mv != state_after_mv
+
 
