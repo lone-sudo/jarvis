@@ -13,7 +13,7 @@ def _confirm(prompt: str) -> bool:
 
 class GitInspector:
     @staticmethod
-    def _run(args: list[str], cwd: Path) -> str:
+    def _run(args: list[str], cwd: Path, *, raw: bool = False) -> str:
         # Caller-supplied Git config options are global options and must stay
         # before the subcommand. Locate that subcommand to apply safe defaults.
         command_index = 0
@@ -37,7 +37,7 @@ class GitInspector:
                 ["git", *safe_args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace",
                 check=True, timeout=15,
             )
-            return result.stdout.strip()
+            return result.stdout if raw else result.stdout.strip()
         except FileNotFoundError:
             # git itself isn't installed / not on PATH -- distinct from a
             # git command failing, and Gemini's original code didn't
