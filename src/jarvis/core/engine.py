@@ -44,7 +44,7 @@ from jarvis.core.plan import (
 )
 from jarvis.policy.rules import ActionTier, SecurityPolicy
 from jarvis.policy.validator import PolicyValidator, PolicyViolation
-from jarvis.state.plan_store import PlanStore, get_task_row
+from jarvis.state.plan_store import PlanLocked, PlanStore, get_task_row
 from jarvis.tools.fs import FileSystemInspector
 from jarvis.tools.git import GitInspector
 
@@ -222,8 +222,24 @@ class ExecutionEngine:
         """
         Runs (or resumes) a plan and returns it. Inspect `.status`:
         COMPLETED, or BLOCKED with `.blocked_reason`. Raises EngineError
-        only when it refuses to start at all.
+        only when it refuses to start at all, including when another live
+        process is already running this plan (nothing is changed then).
+
+        The plan is claimed BEFORE it is read, so the state this run acts on
+        cannot be changed underneath it by a second process. The claim is
+        released on every exit; a crash that skips the release is recovered
+        by the next run (see PlanStore.acquire_run_lock).
         """
+        try:
+            token = self.store.acquire_run_lock(plan_id)
+        except PlanLocked as e:
+            raise EngineError(str(e)) from e
+        try:
+            return self._run_locked(plan_id)
+        finally:
+            self.store.release_run_lock(plan_id, token)
+
+    def _run_locked(self, plan_id: str) -> ExecutionPlan:
         plan = self.store.load(plan_id)
         if plan.status == PlanStatus.COMPLETED:
             raise EngineError(f"Plan {plan_id} is already COMPLETED.")

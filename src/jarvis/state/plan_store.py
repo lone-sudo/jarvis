@@ -7,6 +7,9 @@ they cannot drift from it, and load() reads only plan_json.
 """
 
 import json
+import os
+import sqlite3
+import uuid
 from pathlib import Path
 
 from jarvis.core.plan import ExecutionPlan, PlanFormatError
@@ -15,6 +18,47 @@ from jarvis.state.database import get_connection, init_db
 
 class PlanNotFound(LookupError):
     pass
+
+
+class PlanLocked(Exception):
+    """Another live plan-run process owns this plan. Nothing was changed."""
+
+
+def _pid_alive(pid: int) -> bool:
+    """
+    True if a process with this id exists. When in doubt, True: a wrongly "alive" owner only
+    makes a run refuse to start, a wrongly "dead" one could let two runs execute the same step.
+
+    Not `os.kill(pid, 0)` on Windows: there it does not probe, it TERMINATES the process.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            # 87 = no such process. 5 = exists but we may not open it. Anything else: assume alive.
+            return ctypes.get_last_error() != 87
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
 
 
 def get_task_row(db_path: str | Path, task_id: str) -> dict | None:
@@ -76,6 +120,55 @@ class PlanStore:
             return ExecutionPlan.from_json(row["plan_json"])
         except PlanFormatError as e:
             raise PlanFormatError(f"Stored plan '{plan_id}' is corrupt: {e}") from e
+
+    # ---- run lock (one live plan-run per plan) -------------------------------
+
+    def acquire_run_lock(self, plan_id: str) -> str:
+        """
+        Claims the plan for this process and returns an ownership token for release_run_lock.
+        The PRIMARY KEY makes the claim atomic across processes. If the row's owner process is
+        dead (a crash or kill left it behind), the row is removed by compare-and-delete on its
+        token and the claim retried, so of several racing takers exactly one wins.
+
+        Raises PlanNotFound for an unknown plan and PlanLocked if a live process owns it.
+        """
+        token = uuid.uuid4().hex
+        for _ in range(3):
+            with get_connection(self.db_path) as conn:
+                if conn.execute(
+                    "SELECT 1 FROM execution_plans WHERE plan_id = ?", (plan_id,)
+                ).fetchone() is None:
+                    raise PlanNotFound(f"No plan found with id '{plan_id}'.")
+                try:
+                    conn.execute(
+                        "INSERT INTO plan_run_locks (plan_id, owner_pid, owner_token) VALUES (?, ?, ?)",
+                        (plan_id, os.getpid(), token),
+                    )
+                    return token
+                except sqlite3.IntegrityError:
+                    pass
+                holder = conn.execute(
+                    "SELECT owner_pid, owner_token FROM plan_run_locks WHERE plan_id = ?", (plan_id,)
+                ).fetchone()
+                if holder is None:
+                    continue  # released between our insert and our read: try again
+                if _pid_alive(holder["owner_pid"]):
+                    raise PlanLocked(
+                        f"Plan {plan_id} is already being run by process {holder['owner_pid']}. "
+                        f"Wait for it to finish. Nothing was changed."
+                    )
+                conn.execute(
+                    "DELETE FROM plan_run_locks WHERE plan_id = ? AND owner_token = ?",
+                    (plan_id, holder["owner_token"]),
+                )
+        raise PlanLocked(f"Plan {plan_id} could not be claimed (it is being claimed by another process). Try again.")
+
+    def release_run_lock(self, plan_id: str, token: str) -> None:
+        """Releases only a lock this token owns, so a stale release can never free someone else's."""
+        with get_connection(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM plan_run_locks WHERE plan_id = ? AND owner_token = ?", (plan_id, token)
+            )
 
     def list_for_task(self, task_id: str) -> list[ExecutionPlan]:
         with get_connection(self.db_path) as conn:
