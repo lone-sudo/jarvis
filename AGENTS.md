@@ -68,7 +68,7 @@ Rules that follow:
   so no install is needed for tests.
 - Run the CLI without installing: `$env:PYTHONPATH = "src"; python -m jarvis.interface.cli <command>`.
   The installed `jarvis` console command can be a stale old install. Prefer the line above when in doubt.
-- Two symlink tests skip on Windows without Developer Mode or admin rights. That is expected.
+- About ten tests skip on Windows without Developer Mode or admin rights (mostly symlink tests, plus one for the exec bit and one for file names git would quote). That is expected. Report the exact count.
 - Report the exact count and where you ran it (Linux sandbox, Windows, or both). Never write "all tests
   pass" without the number.
 - Tests must be platform-independent. Do not hardcode `C:/` paths or rely on Windows-only path semantics.
