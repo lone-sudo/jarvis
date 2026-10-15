@@ -85,6 +85,18 @@ the reverse being assumed.
 - The engine relies on `GitInspector._run` / `_authorized_target` (module-private helpers) and adds
   `core/checkpoint.py`; `tools/git.py` itself is untouched.
 - Diagnostics: `git diff` is capped at 50,000 characters, other text fields at 20,000.
+- **Hook policy for `git_commit` (decided by Lone 2026-10-15, M002.1).** Repository git hooks are turned off
+  (`core.hooksPath` set to the null device) for every git command Jarvis runs EXCEPT `commit`, so reading
+  status or a diff never runs repository code. A plan's `git_commit` step still runs the project's own
+  commit hooks (pre-commit, commit-msg, post-commit). That is repository-controlled code running on the
+  person's machine beyond what the plan states, and the `[y/N]` preview does not list the hooks. Pinned by
+  `test_git_run_does_not_override_hooks_for_commit`. Decision: keep this behaviour and document it. Silently
+  disabling hooks would bypass the project's own safeguards (linters, secret scanners). Revisit before any
+  broader autonomy: the options then are block hooks, show them in the preview, or require extra approval.
+- **Commit path link guard (M002.1).** A plan's commit refuses a path whose parent folder is a symlink or
+  Windows directory junction, before it shows the preview and again after the `[y/N]`, because Git for
+  Windows reads a junction as an ordinary folder and could commit files from outside the project. A
+  symlinked file itself is not refused: git records it as a link and the preview does not show its content.
 
 ## Non-goals (unchanged)
 No autonomous loops, no model-written steps executed without per-step confirmation, no network steps,
