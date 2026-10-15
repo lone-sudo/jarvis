@@ -34,3 +34,8 @@ No code change. The test that pins the behaviour already existed.
 - Not reviewed by another model yet.
 - Reading status or a diff through a junction in a tracked folder (not a plan path) is still not blocked on
   the commit path. Only rollback refuses that.
+- **Python floor.** `pyproject.toml` declares Python 3.10 or later, but `Path.is_junction` only exists from 3.12.
+  The shared `_is_link` in `core/checkpoint.py` falls back to "not a junction" without it, so on 3.10 or 3.11 neither
+  this guard nor the rollback guard can see a Windows junction (a symlink is still seen). The ZBook runs 3.14, so it
+  is covered there. Not fixed here: the shared helper belongs in its own change. The fix in words: on Windows, detect
+  a junction from `os.lstat` (the reparse-point attribute plus the mount-point reparse tag) when `is_junction` is missing.
