@@ -72,7 +72,7 @@ Rules that follow:
   so no install is needed for tests.
 - Run the CLI without installing: `$env:PYTHONPATH = "src"; python -m jarvis.interface.cli <command>`.
   The installed `jarvis` console command can be a stale old install. Prefer the line above when in doubt.
-- Two symlink tests skip on Windows without Developer Mode or admin rights. That is expected.
+- About ten tests skip on Windows without Developer Mode or admin rights (mostly symlink tests, plus one for the exec bit and one for file names git would quote). That is expected. Report the exact count.
 - Report the exact count and where you ran it (Linux sandbox, Windows, or both). Never write "all tests
   pass" without the number.
 - Tests must be platform-independent. Do not hardcode `C:/` paths or rely on Windows-only path semantics.
@@ -86,8 +86,9 @@ Rules that follow:
 - A plan's `verify` spec runs outside the four-tool allowlist, so it must be validated like a tool.
   Unrestricted pytest `args` could delete directories (`--basetemp`) or write files outside the project
   (`--junitxml`). Pytest args are allow-listed; absolute paths are rejected.
-- `tools/base.py::run_logged` labels any output containing "denied by policy" as a rejection, even a
-  successful read of a document that quotes the phrase. Known issue, not yet fixed.
+- `tools/base.py::run_logged` once labelled any output containing "denied by policy" as a rejection,
+  even a successful read of a document that quotes the phrase. Fixed in `9fcd303`: only a result that
+  starts with `ERROR:` is classified, so classify tool results by prefix, never by a phrase in the body.
 - Tools report errors as strings starting `ERROR:`. A check that treats a git error as "no output"
   fails open. Fail closed on any `ERROR:`.
 
