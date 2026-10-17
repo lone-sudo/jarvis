@@ -17,6 +17,13 @@ ordinary folder. Both the rollback guard and the plan `git_commit` guard (branch
 - `tests/test_doctor.py`: the fake requirement and fake versions moved up with the floor (same two
   behaviours tested: a satisfying version passes, a lower one fails).
 
+## Added after Antigravity's review (finding 3)
+`jarvis doctor` read the installed package's metadata before `pyproject.toml`, so an old `pip install -e .`
+kept reporting the old `Requires-Python` and doctor said ">=3.11" after the floor moved. In a source checkout
+(a `pyproject.toml` next to `src/jarvis`) doctor now reads `pyproject.toml`; installed metadata is used only
+when there is no checkout. 2 tests, which fail without the fix. Note: Antigravity's report named a repro test
+that is not on its branch, so I reproduced this one myself by reading the code and writing the test.
+
 ## Not changed (on purpose)
 - The `getattr(..., "is_junction", ...)` fallback in `_is_link` stays. It is harmless on 3.12+, and removing it
   is a separate cleanup that belongs with the junction-guard branch's owner review.
