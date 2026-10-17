@@ -9,14 +9,28 @@ from jarvis.interface.cli import main
 
 
 def test_python_requirement_passes_and_fails(monkeypatch):
-    monkeypatch.setattr(doctor, "_requires_python", lambda: ">=3.10")
-    monkeypatch.setattr(doctor.sys, "version_info", (3, 11, 0))
+    monkeypatch.setattr(doctor, "_requires_python", lambda: ">=3.12")
+    monkeypatch.setattr(doctor.sys, "version_info", (3, 13, 0))
     assert doctor.check_python().status == "OK"
 
-    monkeypatch.setattr(doctor.sys, "version_info", (3, 9, 9))
+    monkeypatch.setattr(doctor.sys, "version_info", (3, 11, 9))
     result = doctor.check_python()
     assert result.status == "FAIL"
     assert "does not satisfy" in result.detail
+
+
+def test_source_checkout_reads_pyproject_not_stale_installed_metadata(monkeypatch):
+    stale = SimpleNamespace(get=lambda key: ">=3.11")
+    monkeypatch.setattr(doctor.importlib.metadata, "metadata", lambda name: stale)
+    assert doctor._source_checkout_root() is not None   # these tests run from a checkout
+    assert doctor._requires_python() == doctor._requires_from_pyproject()
+    assert doctor._requires_python() != ">=3.11"
+
+
+def test_without_a_checkout_installed_metadata_is_used(monkeypatch):
+    monkeypatch.setattr(doctor, "_source_checkout_root", lambda: None)
+    monkeypatch.setattr(doctor.importlib.metadata, "metadata", lambda name: SimpleNamespace(get=lambda key: ">=3.12"))
+    assert doctor._requires_python() == ">=3.12"
 
 
 def test_python_requirement_read_error_fails(monkeypatch):

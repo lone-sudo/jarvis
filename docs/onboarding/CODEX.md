@@ -12,7 +12,7 @@ student in Kenya. Jarvis itself owns machine state, memory, task continuity and 
 proposes; Jarvis decides what actually runs. That is why so much of the code is policy checks,
 confirmations and saved evidence.
 
-It is a Python 3.10+ command-line tool (`jarvis ...`), standard library first (one runtime dependency:
+It is a Python 3.12+ command-line tool (`jarvis ...`), standard library first (one runtime dependency:
 `pyperclip`; `pytest` for tests). The real machine is Lone's **HP ZBook, Windows 11**. Development also
 happens on Linux sandboxes. **Windows is the target; Linux passing is not enough.**
 

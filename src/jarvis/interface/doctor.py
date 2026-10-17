@@ -20,7 +20,17 @@ class Check:
     detail: str
 
 
+def _source_checkout_root() -> "Path | None":
+    root = Path(__file__).resolve().parents[3]
+    return root if (root / "pyproject.toml").is_file() and (root / "src" / "jarvis").is_dir() else None
+
+
 def _requires_python() -> str:
+    # In a source checkout pyproject.toml is the truth. Installed metadata can be stale: an old
+    # `pip install -e .` keeps reporting the Requires-Python it was installed with, so doctor said ">=3.11"
+    # after the floor moved (Antigravity's review of the 3.12 change, finding 3).
+    if _source_checkout_root() is not None:
+        return _requires_from_pyproject()
     try:
         return importlib.metadata.metadata("jarvis").get("Requires-Python") or _requires_from_pyproject()
     except importlib.metadata.PackageNotFoundError:
