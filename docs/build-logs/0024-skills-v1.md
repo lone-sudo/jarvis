@@ -45,3 +45,15 @@ contains `: ` (real YAML would not). `jarvis skill` has no create command: files
 ## For Lone on the ZBook
 Make `<workspace>/skills/demo-skill/SKILL.md` (see ADR-0006 for the shape), then run `jarvis skill list`, `show`,
 `approve` (answer `n` once, then `y`), edit one character and `list` again (it must say CHANGED).
+
+## Review and merge (added 2026-10-17)
+Antigravity reviewed `f59ca02` on the ZBook (Windows 11, Python 3.14.8, SQLite 3.50.4). Verdict: merge, no findings.
+It tested real `mklink /J` junctions at the skills folder, a skill folder, `references/`, a junction inside `references/`,
+a dangling junction, and a junction swapped in after approval (all refused, `is_usable` false, `show` refuses). LF, CRLF and
+lone CR gave one hash. It ran the real CLI end to end (list, show, approve `n` then `y`, edit one character gives CHANGED,
+re-approve with diff, disable). Its 7 real-junction tests (`tests/test_skills_windows_verification.py`) skip off Windows.
+Its own run: `tests/test_skills.py` 59 passed, 1 skipped (the real-symlink test: no Developer Mode).
+
+Lone fast-forward merged `feature/antigravity-skills-v1-review` into `main` (`a26d018` to `b7f2963`) and pushed.
+ZBook full run before the push: **583 passed, 13 skipped**. The Not verified section above is now closed for junctions
+and the CLI. Still open: a real symlink check (needs Developer Mode). Skills are still not used by anything (see limits).

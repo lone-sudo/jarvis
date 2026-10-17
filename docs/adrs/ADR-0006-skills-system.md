@@ -1,6 +1,6 @@
 # ADR-0006: Skills System — Text-Only, Hash-Pinned, Owned by Jarvis
 
-**Status:** Accepted by Lone on 2026-10-17 (reviewed by Antigravity; merged to `main` as a proposal first). Version 1 is built on `feature/claude-skills-v1` (build log 0024) and awaits review. Nothing here is verified on the ZBook until Lone runs it (invariant 5).
+**Status:** Accepted by Lone on 2026-10-17 (reviewed by Antigravity; merged to `main` as a proposal first). Version 1 was built (build log 0024), reviewed by Antigravity on the ZBook (verdict: merge, no findings) and fast-forward merged to `main` by Lone on 2026-10-17 at `b7f2963`. ZBook full run after the merge: 583 passed, 13 skipped.
 **Date:** 2026-10-16
 
 ## Context
