@@ -1,6 +1,6 @@
 # ADR-0006: Skills System — Text-Only, Hash-Pinned, Owned by Jarvis
 
-**Status:** Proposed. Not implemented. Needs Antigravity's review, then Lone's acceptance. Nothing here is verified on the ZBook (invariant 5).
+**Status:** Accepted by Lone on 2026-10-17 (reviewed by Antigravity; merged to `main` as a proposal first). Version 1 is built on `feature/claude-skills-v1` (build log 0024) and awaits review. Nothing here is verified on the ZBook until Lone runs it (invariant 5).
 **Date:** 2026-10-16
 
 ## Context
@@ -14,8 +14,11 @@ traffic, holds keys, or runs code needs review first". This ADR keeps skills on 
 line: they are reviewed text, they hold no keys, and in version 1 they run nothing.
 
 ## Decision
-1. **A skill is a folder** `skills/<name>/` inside the repository, holding `SKILL.md` and optional
-   `references/*.md`. Skills live in git, so every change is a diff that another model reviews and Lone merges.
+1. **A skill is a folder** `<workspace>/skills/<name>/` (the workspace root, `JARVIS_WORKSPACE_ROOT`), holding
+   `SKILL.md` and optional flat `references/*.md`. *Amended during the build:* this said "inside the repository",
+   but every Jarvis file operation is contained to the workspace (invariant 2) and the Jarvis checkout is not
+   inside it. Skills therefore live in the workspace. Making that folder a git repository, so that every change is a
+   diff another model reviews, is up to Lone and does not change the code.
 2. **Version 1 is text only.** A skill can be listed, shown and approved. It cannot execute code, call a
    tool, fetch a URL, or grant itself any permission. Tools stay governed by the policy layer and the
    engine's four-tool allowlist (ADR-0005 g).
@@ -43,8 +46,9 @@ line: they are reviewed text, they hold no keys, and in version 1 they run nothi
    folders cannot produce the same byte stream (Antigravity's re-review). Approval records that hash. Any change to any file makes the skill `unapproved` until it is approved
    again. An unapproved skill can be shown (with a warning) but is never reported as usable.
 5. **State in SQLite, content in Markdown** (invariant 4). A `skills` table holds: `name` (primary key),
-   `path` (project-relative, POSIX style), `content_hash`, `status` (`proposed`, `approved`, `disabled`),
-   `approved_at`. A migration adds it. Its number is the next free one on `main` at build time (006 is
+   `path` (workspace-relative, POSIX style), `content_hash`, `status` (`approved` or `disabled`; "proposed" is simply
+   a skill with no row), `approved_at`, and `snapshot_json` (the approved text, so a later approval can show a real
+   diff; a hash alone cannot). Migration 007 adds it, together with an append-only `skill_events` table (see 9). Its number is the next free one on `main` at build time (006 is
    taken by the run-lock branch, so if that is not merged yet the skills branch must be cut after it, or take
    the next number and say so in its build log). Two branches must never both add the same number.
 6. **Commands.**
@@ -62,7 +66,10 @@ line: they are reviewed text, they hold no keys, and in version 1 they run nothi
    (build log 0022, review finding 1). Otherwise a junction could smuggle an outside tree into the registry.
 8. **Skill text is data.** It is never injected into a prompt automatically and no hook fires on it. A
    person or an AI attaches a skill to a task spec on purpose. Text from a skill never changes policy.
-9. **Logging.** Every `list`, `show` and `approve` is logged to `executions` with the skill name and hash.
+9. **Logging.** Every `list`, `show`, `approve` (including declined and refused) and `disable` is appended to
+   `skill_events` with the skill name and hash. *Amended during the build:* this said `executions`, but every
+   `executions` row needs a task (`task_id` is a required foreign key) and a skill command is not part of a task.
+   A separate event table keeps the audit trail without forcing a fake task. Events are never updated or deleted.
 
 ## What this deliberately leaves out
 Auto-discovery or search of remote skill registries (Find Skills), a marketplace, telemetry, self-modifying

@@ -21,6 +21,7 @@ from jarvis.core.plan import ExecutionPlan, PlanFormatError
 from jarvis.core.engine import EngineError, ExecutionEngine, validate_plan
 from jarvis.core.checkpoint import CheckpointError, rollback as rollback_to_checkpoint
 from jarvis.core.task_completion import complete_task
+from jarvis.core.skills import STATE_LABELS, SkillError, SkillStore, skills_root
 from jarvis.state.plan_store import PlanNotFound, PlanStore, get_task_row
 from jarvis.interface import doctor
 
@@ -767,6 +768,31 @@ def _make_output_safe() -> None:
                 pass
 
 
+def cmd_skill(args):
+    """Skills v1 (ADR-0006): list, show, approve, disable. Text only; nothing here runs a skill."""
+    tracker = StateTracker()
+    store = SkillStore(tracker.db_path)
+    try:
+        if args.skill_command == "list":
+            infos = store.list_skills()
+            if not infos:
+                print(f"No skills found. A skill is a folder with a SKILL.md inside {skills_root()}.")
+                return
+            for info in infos:
+                line = f"  {info.name:<28} {STATE_LABELS[info.state]}"
+                if info.detail and info.state in ("refused", "missing"):
+                    line += f"  -- {info.detail}"
+                print(line)
+        elif args.skill_command == "show":
+            store.show(args.name)
+        elif args.skill_command == "approve":
+            print(store.approve(args.name))
+        elif args.skill_command == "disable":
+            print(store.disable(args.name))
+    except SkillError as e:
+        print(f"ERROR: {e}")
+
+
 def main():
     _make_output_safe()
     parser = argparse.ArgumentParser(prog="jarvis", description="Jarvis Personal AI Operating Layer")
@@ -904,6 +930,21 @@ def main():
     )
     p_rollback.add_argument("--checkpoint", required=True, help="Checkpoint ID (CHK-...)")
     p_rollback.set_defaults(func=cmd_rollback)
+
+    p_skill = subparsers.add_parser(
+        "skill", help="Text-only skills (ADR-0006): list, show, approve, disable. Nothing is ever run."
+    )
+    skill_sub = p_skill.add_subparsers(dest="skill_command", required=True)
+    skill_sub.add_parser("list", help="List skills in <workspace>/skills and their approval state")
+    p_skill_show = skill_sub.add_parser("show", help="Print a skill (read-only; warns if it is not approved)")
+    p_skill_show.add_argument("name")
+    p_skill_approve = skill_sub.add_parser(
+        "approve", help="[SAFE_WRITE] Show the skill or its changes, then ask [y/N] before recording approval"
+    )
+    p_skill_approve.add_argument("name")
+    p_skill_disable = skill_sub.add_parser("disable", help="Mark an approved skill disabled")
+    p_skill_disable.add_argument("name")
+    p_skill.set_defaults(func=cmd_skill)
 
     p_resume = subparsers.add_parser("resume", help="Show active task state and context")
     p_resume.set_defaults(func=cmd_resume)
