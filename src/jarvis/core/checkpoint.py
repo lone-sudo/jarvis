@@ -30,7 +30,7 @@ from pathlib import Path
 from jarvis.core.plan import PlanStatus
 from jarvis.policy.rules import ActionTier
 from jarvis.state.database import get_connection
-from jarvis.state.plan_store import PlanStore, get_task_row
+from jarvis.state.plan_store import PlanLocked, PlanStore, get_task_row
 from jarvis.tools.git import GitInspector
 
 
@@ -290,6 +290,35 @@ def get_checkpoint(db_path, checkpoint_id: str) -> dict | None:
 
 
 def rollback(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, out=print) -> str:
+    """
+    Takes the run lock of every plan that used this checkpoint, then rolls back (see
+    _rollback_locked). A plan that is running right now refuses the rollback instead of having
+    its work erased under it, and a run cannot start while the rollback is waiting at [y/N]
+    (Antigravity's review of M002.1, finding 2).
+    """
+    cp = get_checkpoint(tracker.db_path, checkpoint_id)
+    if cp is None:
+        raise CheckpointError(f"No checkpoint found with id '{checkpoint_id}'.")
+    store = PlanStore(tracker.db_path)
+    held: list[tuple[str, str]] = []
+    try:
+        for plan in store.list_for_task(cp["task_id"]):
+            if plan.checkpoint_id != checkpoint_id:
+                continue
+            try:
+                held.append((plan.plan_id, store.acquire_run_lock(plan.plan_id)))
+            except PlanLocked as e:
+                raise CheckpointError(
+                    f"Cannot roll back: plan {plan.plan_id} is running right now ({e}). "
+                    "Let it finish or stop it, then run the rollback again."
+                ) from e
+        return _rollback_locked(tracker, checkpoint_id, auto_confirm=auto_confirm, out=out)
+    finally:
+        for plan_id, token in held:
+            store.release_run_lock(plan_id, token)
+
+
+def _rollback_locked(tracker, checkpoint_id: str, *, auto_confirm: bool | None = None, out=print) -> str:
     """
     Restores the project to a checkpoint's commit with `git reset --hard`,
     after showing what will be discarded and asking [y/N] (auto_confirm

@@ -86,7 +86,8 @@ the reverse being assumed.
   refused with `EngineError` and changes nothing. The row records the owner's process id. If that process
   is dead (crash or kill) the next run takes the lock over and the existing resume path continues the plan.
   Known limits: a reused process id can make a stale lock look alive (the run then refuses, which is the
-  safe direction, and there is no unlock command yet), and `jarvis rollback` does not take this lock.
+  safe direction, and there is no unlock command yet). `jarvis rollback` takes the same lock for every plan
+  that used the checkpoint, so it refuses while one is running (Antigravity's review, finding 2).
   Coordination state lives in SQLite, not in lock files (invariant 3 and 4).
 - The engine relies on `GitInspector._run` / `_authorized_target` (module-private helpers) and adds
   `core/checkpoint.py`; `tools/git.py` itself is untouched.

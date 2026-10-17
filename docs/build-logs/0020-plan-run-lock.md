@@ -30,5 +30,5 @@ pid lock table (its A1) and avoids the localhost-socket design, which refused le
   Needs a real Windows run, including a child process that exits without releasing.
 - A reused process id can make a stale lock look alive. The run then refuses and says which process id holds it.
   There is no unlock command yet.
-- `jarvis rollback` does not take the lock, so a rollback during a `plan-run` is still unguarded.
+- ~~`jarvis rollback` does not take the lock.~~ Fixed after Antigravity's review (finding 2, reproduced): `rollback` now takes the run lock of every plan that used the checkpoint, so a live run refuses it and no run can start while it waits at `[y/N]`. Locks are released on success, decline and error. `tests/test_rollback_run_lock.py` (7 tests; 2 fail without the fix, checked by removing it). Linux: 495 passed.
 - Reviewed by no other model yet (author must not self-review).
