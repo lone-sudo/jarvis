@@ -81,7 +81,14 @@ the reverse being assumed.
   therefore logs its own step rows with an exact status instead of using `run_logged`. `run_logged` itself is unchanged.
 - `git reset --hard` drops commits from the branch (recoverable via `git reflog`) and discards tracked
   changes. Rollback previews both, refuses on a different branch, and asks `[y/N]`.
-- No locking: two simultaneous `plan-run` processes on one plan are not guarded against.
+- **Run lock (amended M002.1).** `plan-run` claims the plan before reading it, through a `plan_run_locks`
+  row (migration 006, primary key `plan_id`), so only one live process runs a plan. A second run is
+  refused with `EngineError` and changes nothing. The row records the owner's process id. If that process
+  is dead (crash or kill) the next run takes the lock over and the existing resume path continues the plan.
+  Known limits: a reused process id can make a stale lock look alive (the run then refuses, which is the
+  safe direction, and there is no unlock command yet). `jarvis rollback` takes the same lock for every plan
+  that used the checkpoint, so it refuses while one is running (Antigravity's review, finding 2).
+  Coordination state lives in SQLite, not in lock files (invariant 3 and 4).
 - The engine relies on `GitInspector._run` / `_authorized_target` (module-private helpers) and adds
   `core/checkpoint.py`; `tools/git.py` itself is untouched.
 - Diagnostics: `git diff` is capped at 50,000 characters, other text fields at 20,000.
