@@ -130,3 +130,28 @@ def test_rollback_does_not_check_plan_run_locks(env):
     # The plan state was reset to PENDING while the lock was still active:
     reloaded = env.store.load(plan.plan_id)
     assert reloaded.status == PlanStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 Reproduction: Doctor reads stale installed metadata before pyproject
+# ---------------------------------------------------------------------------
+
+def test_doctor_requires_python_reads_stale_installed_metadata_before_pyproject(monkeypatch):
+    """
+    Finding 3: When jarvis is installed in the environment with older metadata
+    (e.g. Requires-Python: >=3.11), _requires_python() consults importlib.metadata first,
+    causing doctor to report '>=3.11' instead of the repository's pyproject.toml requirement.
+    """
+    from jarvis.interface import doctor
+
+    # Simulate pyproject.toml specifying >=3.12 and installed metadata having stale >=3.11:
+    monkeypatch.setattr(doctor, "_requires_from_pyproject", lambda: ">=3.12")
+    stale_meta = SimpleNamespace(get=lambda key: ">=3.11" if key == "Requires-Python" else None)
+    monkeypatch.setattr(doctor.importlib.metadata, "metadata", lambda name: stale_meta)
+
+    # In the unfixed doctor.py, _requires_python() returns stale >=3.11, ignoring pyproject.toml:
+    assert doctor._requires_python() == ">=3.11"
+    assert doctor._requires_python() != doctor._requires_from_pyproject()
+    assert ">=3.11" in doctor.check_python().detail
+
+
