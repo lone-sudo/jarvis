@@ -9,11 +9,11 @@ from jarvis.interface.cli import main
 
 
 def test_python_requirement_passes_and_fails(monkeypatch):
-    monkeypatch.setattr(doctor, "_requires_python", lambda: ">=3.10")
-    monkeypatch.setattr(doctor.sys, "version_info", (3, 11, 0))
+    monkeypatch.setattr(doctor, "_requires_python", lambda: ">=3.12")
+    monkeypatch.setattr(doctor.sys, "version_info", (3, 13, 0))
     assert doctor.check_python().status == "OK"
 
-    monkeypatch.setattr(doctor.sys, "version_info", (3, 9, 9))
+    monkeypatch.setattr(doctor.sys, "version_info", (3, 11, 9))
     result = doctor.check_python()
     assert result.status == "FAIL"
     assert "does not satisfy" in result.detail
