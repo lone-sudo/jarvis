@@ -15,6 +15,8 @@ continuity and tool execution. AI models are replaceable reasoning backends, nev
 2. **Workspace containment.** All file operations go through `SecurityPolicy.resolve_safe_path()`,
    contained to `JARVIS_WORKSPACE_ROOT`. Path traversal is blocked (ADR-0003).
 3. **Confirmed mutations.** `write-file` and `git-commit` show a diff and need an interactive `[y/N]`.
+   `task-done` is the same kind of action: DONE is terminal, so it shows the task and its plans and needs
+   a `[y/N]`, and no other path may set a task DONE without that confirmation (`ask-ai --done` asks it too).
    Any new command that writes a file must call `FileSystemInspector.write_file`. It must never write
    with `Path.write_text`, `open(..., "w")` or similar, even for an export or a log, and even when the
    path has already passed `resolve_safe_path()`. The only exceptions are Jarvis's own Dual Storage

@@ -20,7 +20,8 @@ from jarvis.policy.url_validation import URLPolicyViolation
 from jarvis.core.plan import ExecutionPlan, PlanFormatError
 from jarvis.core.engine import EngineError, ExecutionEngine, validate_plan
 from jarvis.core.checkpoint import CheckpointError, rollback as rollback_to_checkpoint
-from jarvis.state.plan_store import PlanNotFound, PlanStore
+from jarvis.core.task_completion import complete_task
+from jarvis.state.plan_store import PlanNotFound, PlanStore, get_task_row
 from jarvis.interface import doctor
 
 
@@ -122,14 +123,36 @@ def cmd_ask_ai(args):
     tracker = StateTracker()
     provider = _select_backend(args.backend, args.provider)
     from jarvis.providers.base import dispatch_and_track
+    # Never mark_done=True here: DONE is permanent, so it needs the same confirmation as `task-done`,
+    # asked AFTER the response has been shown. Declining leaves the task IN_PROGRESS.
     response = run_logged(
         tracker, args.task, f"provider:{args.provider}", "EXTERNAL",
-        lambda: dispatch_and_track(provider, tracker, args.task, args.prompt, mark_done=args.done),
+        lambda: dispatch_and_track(provider, tracker, args.task, args.prompt, mark_done=False),
         input_summary=args.prompt[:200],
     )
     print("\n--- Response received ---")
     print(response)
-    print(f"\nTask {args.task} is now: {'DONE' if args.done else 'IN_PROGRESS'}")
+    if args.done:
+        print()
+        print(_run_task_done(tracker, args.task))
+    else:
+        print(f"\nTask {args.task} is now: IN_PROGRESS")
+
+
+def _run_task_done(tracker, task_id: str) -> str:
+    return run_logged(
+        tracker, task_id, "task_done", "SAFE_WRITE",
+        lambda: complete_task(tracker, task_id),
+        input_summary=f"task={task_id}",
+    )
+
+
+def cmd_task_done(args):
+    tracker = StateTracker()
+    if get_task_row(tracker.db_path, args.task) is None:
+        print(f"ERROR: No task found with id '{args.task}'. Nothing changed.")
+        return
+    print(_run_task_done(tracker, args.task))
 
 
 def _inbox_store() -> InboxStore:
@@ -795,8 +818,14 @@ def main():
                             "clipboard round-trip -- unchanged. 'gemini' makes a real network call via GEMINI_API_KEY; "
                             "explicit opt-in only, never silently switched.")
     p_ask.add_argument("prompt", help="Prompt text to dispatch")
-    p_ask.add_argument("--done", action="store_true", help="Mark task DONE after response (default: IN_PROGRESS)")
+    p_ask.add_argument("--done", action="store_true", help="After the response, offer to mark the task DONE (asks [y/N], permanent). Default: IN_PROGRESS")
     p_ask.set_defaults(func=cmd_ask_ai)
+
+    p_task_done = subparsers.add_parser(
+        "task-done", help="[SAFE_WRITE] Mark a task DONE. Permanent: shows the task and its plans, then asks [y/N]"
+    )
+    p_task_done.add_argument("task", help="Task ID (TSK-...)")
+    p_task_done.set_defaults(func=cmd_task_done)
 
     p_save = subparsers.add_parser("save", help="Save a link or raw text to the content inbox (manual capture only, unless --fetch)")
     p_save.add_argument("--url", default=None, help="Source URL (stored as a reference; never auto-fetched unless --fetch is passed)")
