@@ -11,6 +11,11 @@ show that outside content as the plan's own.
   rollback's own `_is_link`, which treats a junction like a symlink. The file itself is not checked: my first
   version did check it, and the existing test `test_preview_does_not_follow_a_symlink_for_new_file_content`
   failed, because git records a symlinked file as a link and the preview already handles it safely.
+- **Added after Antigravity's review (finding 1, reproduced on the ZBook with a real junction):** a plan path that is
+  itself a link to a FOLDER (`paths=["sub"]`, `sub` a junction) is refused too, because `git add sub` walks through
+  it. The check is `_is_link(path) and path.is_dir()`, so a link at a file is still left alone. 3 new tests; they
+  fail without the fix, including a real symlinked-folder case on Linux. This also corrects the claim above
+  that only parents need checking.
 - It runs twice: before anything is shown, and again after the `[y/N]` and before `git add`, because the
   prompt can stay open indefinitely. A refusal changes nothing and returns an `ERROR:` string, so the plan
   goes BLOCKED with the message in its diagnostics, as for any tool error.

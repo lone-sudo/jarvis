@@ -84,6 +84,29 @@ def test_a_junction_in_place_of_the_parent_folder_is_refused(env, monkeypatch, c
     assert "Proposed commit" not in capsys.readouterr().out   # refused before any preview
 
 
+@pytest.mark.parametrize("arg", ["sub", "sub/"])
+def test_a_plan_path_that_is_itself_a_junction_to_a_folder_is_refused(env, monkeypatch, arg):
+    # Antigravity finding 1: `git add sub` walks through a junction named `sub`. Simulated with a real folder.
+    write_plan_file(env)
+    pretend_is_junction(monkeypatch, "sub")
+    before = head(env)
+    result = commit_plan_paths("proj", "m", [arg], auto_confirm=True)
+    assert result.startswith("ERROR: Refusing to commit: the folder 'sub' is a link or junction")
+    assert head(env) == before and staged(env) == ""
+
+
+def test_a_real_symlinked_folder_as_the_plan_path_is_refused_and_nothing_leaks(env):
+    try:
+        os.symlink(env.outside, env.repo / "sub", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("cannot create a symlink here")
+    before = head(env)
+    result = commit_plan_paths("proj", "m", ["sub"], auto_confirm=True)
+    assert "is a link or junction" in result
+    assert head(env) == before
+    assert "f.txt" not in git(env.repo, "ls-files")
+
+
 def test_a_link_at_the_file_itself_is_left_to_the_preview_not_refused_here(env, monkeypatch):
     # git records a symlinked file as a link and does not read through it, and the preview already
     # refuses to show its content (test_engine_core.py::test_preview_does_not_follow_a_symlink_...).

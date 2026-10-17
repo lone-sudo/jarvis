@@ -26,7 +26,8 @@ MAX_EXCLUDED_LISTED = 20
 def _first_link_on_the_way_to(target: Path, paths: list[str]) -> "str | None":
     """
     The first parent folder (project-relative) of any plan path that is a symlink or a Windows
-    directory junction, else None. The file itself is not checked: git records a symlinked file as a
+    directory junction, or the path itself when it is such a link to a folder, else None. A link at
+    a file is not checked: git records a symlinked file as a
     link rather than reading through it, and the preview already refuses to show its content
     (test_preview_does_not_follow_a_symlink_for_new_file_content).
 
@@ -43,6 +44,14 @@ def _first_link_on_the_way_to(target: Path, paths: list[str]) -> "str | None":
             current = current / part
             if _is_link(current):
                 return "/".join(parts[:depth])
+        # The path itself, when it is a link that leads to a FOLDER: `git add sub` walks through a
+        # junction (or symlinked folder) named `sub` and commits what is outside the project
+        # (Antigravity's review of M002.1, finding 1, reproduced on Windows). A link at a FILE is still
+        # left alone, for the reason in the docstring.
+        if parts:
+            full = current / parts[-1]
+            if _is_link(full) and full.is_dir():
+                return "/".join(parts)
     return None
 
 

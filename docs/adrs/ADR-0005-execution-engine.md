@@ -97,6 +97,7 @@ the reverse being assumed.
   Windows directory junction, before it shows the preview and again after the `[y/N]`, because Git for
   Windows reads a junction as an ordinary folder and could commit files from outside the project. A
   symlinked file itself is not refused: git records it as a link and the preview does not show its content.
+  A plan path that is itself a link to a folder is refused (`git add sub` would walk through it).
 
 ## Non-goals (unchanged)
 No autonomous loops, no model-written steps executed without per-step confirmation, no network steps,
