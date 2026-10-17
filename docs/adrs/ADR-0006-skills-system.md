@@ -34,12 +34,17 @@ line: they are reviewed text, they hold no keys, and in version 1 they run nothi
    - The spec lets a skill folder hold any extra files. Jarvis is deliberately stricter: only `SKILL.md`
      and `references/*.md`. The spec's own reference validator (`skills-ref validate`) was not run.
    - The spec recommends `SKILL.md` under 500 lines and about 5,000 tokens. Jarvis sets a hard size cap.
-4. **Hash pinning.** A skill's identity is the SHA-256 of its folder (sorted relative paths plus contents).
-   Approval records that hash. Any change to any file makes the skill `unapproved` until it is approved
+4. **Hash pinning.** A skill's identity is the SHA-256 of its folder: for each file in sorted
+   POSIX-relative-path order, the path, a separator and the file's content, where content is read as UTF-8
+   text with `\r\n` and lone `\r` converted to `\n` first. Without that, git's `core.autocrlf` would give
+   the ZBook (CRLF) and the sandbox (LF) different hashes for the same skill (Antigravity's review).
+   A file that is not valid UTF-8, or contains a NUL byte, is refused. Approval records that hash. Any change to any file makes the skill `unapproved` until it is approved
    again. An unapproved skill can be shown (with a warning) but is never reported as usable.
 5. **State in SQLite, content in Markdown** (invariant 4). A `skills` table holds: `name` (primary key),
    `path` (project-relative, POSIX style), `content_hash`, `status` (`proposed`, `approved`, `disabled`),
-   `approved_at`. A migration adds it (next free number at build time; 006 is taken by the run-lock branch).
+   `approved_at`. A migration adds it. Its number is the next free one on `main` at build time (006 is
+   taken by the run-lock branch, so if that is not merged yet the skills branch must be cut after it, or take
+   the next number and say so in its build log). Two branches must never both add the same number.
 6. **Commands.**
    - `jarvis skill list`: names, status, and whether the folder hash still matches.
    - `jarvis skill show NAME`: prints the skill; read-only.
@@ -48,9 +53,11 @@ line: they are reviewed text, they hold no keys, and in version 1 they run nothi
    - `jarvis skill disable NAME`: sets `disabled`. Archive, never delete (existing project rule).
    Creating or editing a skill file goes through `FileSystemInspector.write_file` (diff and `[y/N]`,
    invariant 3). The skill code must never write a skill file any other way.
-7. **Containment.** Every path goes through `SecurityPolicy.resolve_safe_path()`. Links and junctions
-   inside a skill folder are refused (reuse the existing link check; it needs Python 3.12 on Windows, see
-   Related decisions).
+7. **Containment.** Every path goes through `SecurityPolicy.resolve_safe_path()`. Discovery, hashing and
+   `show` all refuse a link or junction anywhere: the `skills/` folder itself, a skill folder, and any file
+   or folder inside one. Reuse the shared `_is_link` check (it needs Python 3.12 on Windows, see Related
+   decisions) and check the path itself as well as its parents, the way the plan-commit guard now does
+   (build log 0022, review finding 1). Otherwise a junction could smuggle an outside tree into the registry.
 8. **Skill text is data.** It is never injected into a prompt automatically and no hook fires on it. A
    person or an AI attaches a skill to a task spec on purpose. Text from a skill never changes policy.
 9. **Logging.** Every `list`, `show` and `approve` is logged to `executions` with the skill name and hash.
@@ -70,7 +77,9 @@ skills (Task Observer), script execution, MCP servers, and always-on hooks (Pony
 - A valid text skill lists, shows and approves. Declining the prompt leaves the row unchanged.
 - A skill with `allowed-tools`, an unknown frontmatter key, `scripts/` or `assets/` is refused (one test each).
 - Editing an approved skill by one byte marks it unapproved (test).
-- A skill name or path that escapes `skills/`, or a link or junction inside a skill, is refused.
+- A skill name or path that escapes `skills/`, or a link or junction at the `skills/` folder, a skill
+  folder, or any file or folder inside one, is refused (the path itself, not only its parents).
+- The same skill with LF and with CRLF line endings has the same hash (test).
 - No skill file is written without the diff and `[y/N]`.
 - At least 20 new tests. The exact pass count is reported, with where it ran (Linux sandbox or Windows).
 
