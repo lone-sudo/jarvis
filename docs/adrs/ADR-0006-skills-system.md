@@ -23,9 +23,17 @@ line: they are reviewed text, they hold no keys, and in version 1 they run nothi
    `license`, `compatibility`, `metadata`. A skill that carries any other key (notably `allowed-tools`) or
    a `scripts/` or `assets/` folder is **refused with a clear message**, never silently ignored.
    `name` must equal the folder name. Size limits apply to `SKILL.md` and to the whole folder.
-   *Open item:* these field names and limits come from prior knowledge. The published specification at
-   agentskills.io could not be fetched when this ADR was drafted. Before the parser is written, check
-   each key and limit against the spec and amend this section.
+   *Checked against the published specification (agentskills.io/specification, read 2026-10-17):*
+   - `name` and `description` are required. `name`: 1 to 64 characters, lowercase letters, digits and
+     hyphens, no leading or trailing hyphen, no `--`, must match the parent folder. The spec allows
+     Unicode lowercase letters; Jarvis is stricter and accepts ASCII `a-z`, `0-9` and `-` only.
+   - `description`: 1 to 1024 characters, non-empty.
+   - `license` (optional, short). `compatibility` (optional, 1 to 500 characters).
+     `metadata` (optional, a map of string keys to string values).
+   - `allowed-tools` is optional and marked experimental in the spec. Jarvis refuses it.
+   - The spec lets a skill folder hold any extra files. Jarvis is deliberately stricter: only `SKILL.md`
+     and `references/*.md`. The spec's own reference validator (`skills-ref validate`) was not run.
+   - The spec recommends `SKILL.md` under 500 lines and about 5,000 tokens. Jarvis sets a hard size cap.
 4. **Hash pinning.** A skill's identity is the SHA-256 of its folder (sorted relative paths plus contents).
    Approval records that hash. Any change to any file makes the skill `unapproved` until it is approved
    again. An unapproved skill can be shown (with a warning) but is never reported as usable.
