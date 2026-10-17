@@ -38,7 +38,9 @@ line: they are reviewed text, they hold no keys, and in version 1 they run nothi
    POSIX-relative-path order, the path, a separator and the file's content, where content is read as UTF-8
    text with `\r\n` and lone `\r` converted to `\n` first. Without that, git's `core.autocrlf` would give
    the ZBook (CRLF) and the sandbox (LF) different hashes for the same skill (Antigravity's review).
-   A file that is not valid UTF-8, or contains a NUL byte, is refused. Approval records that hash. Any change to any file makes the skill `unapproved` until it is approved
+   A file that is not valid UTF-8, or contains a NUL byte, is refused. Between a path and its content, and
+   between files, the hasher writes a NUL byte: no path or accepted content can contain one, so two different
+   folders cannot produce the same byte stream (Antigravity's re-review). Approval records that hash. Any change to any file makes the skill `unapproved` until it is approved
    again. An unapproved skill can be shown (with a warning) but is never reported as usable.
 5. **State in SQLite, content in Markdown** (invariant 4). A `skills` table holds: `name` (primary key),
    `path` (project-relative, POSIX style), `content_hash`, `status` (`proposed`, `approved`, `disabled`),
