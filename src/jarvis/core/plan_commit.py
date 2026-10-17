@@ -15,11 +15,52 @@ swept in, and the preview names what is being left out.
 
 from pathlib import Path, PurePosixPath
 
+from jarvis.core.checkpoint import _is_link
 from jarvis.policy.rules import ActionTier
 from jarvis.tools.git import GitInspector
 
 MAX_DIFF_PREVIEW = 4000
 MAX_EXCLUDED_LISTED = 20
+
+
+def _first_link_on_the_way_to(target: Path, paths: list[str]) -> "str | None":
+    """
+    The first parent folder (project-relative) of any plan path that is a symlink or a Windows
+    directory junction, or the path itself when it is such a link to a folder, else None. A link at
+    a file is not checked: git records a symlinked file as a
+    link rather than reading through it, and the preview already refuses to show its content
+    (test_preview_does_not_follow_a_symlink_for_new_file_content).
+
+    Git for Windows treats a junction as an ordinary folder and walks into it. Staging a path under a
+    junction would read a file from outside the project and commit it into the repository, and the
+    preview would show that outside content as if it were the plan's. The write step is confined to the
+    project, but a link can be put in place afterwards, so this is checked here too, as rollback does
+    for tracked folders (`_refuse_if_tracked_folder_is_a_link`).
+    """
+    for rel in paths:
+        parts = PurePosixPath(rel).parts
+        current = Path(target)
+        for depth, part in enumerate(parts[:-1], start=1):
+            current = current / part
+            if _is_link(current):
+                return "/".join(parts[:depth])
+        # The path itself, when it is a link that leads to a FOLDER: `git add sub` walks through a
+        # junction (or symlinked folder) named `sub` and commits what is outside the project
+        # (Antigravity's review of M002.1, finding 1, reproduced on Windows). A link at a FILE is still
+        # left alone, for the reason in the docstring.
+        if parts:
+            full = current / parts[-1]
+            if _is_link(full) and full.is_dir():
+                return "/".join(parts)
+    return None
+
+
+def _link_refusal(link: str, when: str) -> str:
+    return (
+        f"ERROR: Refusing to commit: the folder '{link}' is a link or junction{when}. Git would read it as an "
+        f"ordinary folder and could commit files from outside the project. Nothing was staged or committed. "
+        f"Remove the link and restore the real folder, then re-run the plan."
+    )
 
 
 def _confirm(prompt: str) -> bool:
@@ -136,6 +177,10 @@ def commit_plan_paths(
     if error:
         return error
 
+    link = _first_link_on_the_way_to(target, paths)
+    if link:
+        return _link_refusal(link, "")
+
     specs = [_literal(p) for p in paths]
     # -z: NUL-separated, never-quoted paths (see _parse_status_v2). -uall lists untracked files
     # one by one instead of collapsing a new directory to "dir/" (which made a file this plan
@@ -187,6 +232,11 @@ def commit_plan_paths(
     confirmed = auto_confirm if auto_confirm is not None else _confirm("Commit these files?")
     if not confirmed:
         return "ERROR: Access denied by policy. (declined by user)"
+
+    # The prompt can stay open for as long as the person likes: look again before staging anything.
+    link = _first_link_on_the_way_to(target, paths)
+    if link:
+        return _link_refusal(link, " (it changed while the prompt was open)")
 
     add_result = GitInspector._run(["add", "--", *specs], target)
     if add_result.startswith("ERROR"):
